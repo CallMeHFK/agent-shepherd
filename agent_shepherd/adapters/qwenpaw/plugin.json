@@ -1,0 +1,15 @@
+{
+  "id": "agent-shepherd",
+  "name": "agent-shepherd",
+  "display_name": "Agent Shepherd",
+  "description": "Supervisor that observes QwenPaw's reasoning loop and injects corrective guidance when it drifts off course.",
+  "version": "0.1.0",
+  "qwenpaw_version": {
+    "min": "2.2.0",
+    "max": "2.3.0"
+  },
+  "entry": {
+    "backend": "backend/main.py"
+  },
+  "dependencies": []
+}

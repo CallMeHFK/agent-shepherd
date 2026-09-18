@@ -1,0 +1,161 @@
+"""Configuration loading for the supervisor daemon and adapters.
+
+The supervisor reads a single YAML file at ``~/.shepherd/config.yaml``. It is
+deliberately small and human-editable. Unknown keys are ignored so a newer
+supervisor can still start with an older config file.
+
+Two backend modes are supported for the judge model:
+
+1. ``agnes`` — the Sapiens AI model family, served at the Agnes AI Hub
+   (OpenAI-compatible API). This is the default because it is the only
+   reachable model endpoint in the local environment today.
+2. ``openai`` / ``vllm`` — any OpenAI-compatible endpoint (local vLLM,
+   cc-switch, etc.) with a user-supplied base URL and model name.
+
+Never store real API keys in this file. Keys come from environment variables
+or from the shell snapshots of the agent being supervised.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+@dataclass
+class JudgeConfig:
+    """How the supervisor reaches its LLM judge."""
+
+    backend: str = "agnes"
+    base_url: str = "https://apihub.agnes-ai.com/v1"
+    model: str = "agnes-3.0-flash"
+    api_key: str = ""
+    timeout: float = 30.0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> JudgeConfig:
+        data = data or {}
+        cfg = cls(
+            backend=str(data.get("backend", "agnes")),
+            base_url=str(data.get("base_url", "https://apihub.agnes-ai.com/v1")),
+            model=str(data.get("model", "agnes-3.0-flash")),
+            api_key=str(data.get("api_key", "")),
+            timeout=float(data.get("timeout", 30.0)),
+        )
+        # Env vars override the file. This lets a user keep the config file
+        # clean while still pointing at a different judge at runtime.
+        cfg.backend = os.environ.get("SHEPHERD_JUDGE_BACKEND", cfg.backend)
+        cfg.base_url = os.environ.get("SHEPHERD_JUDGE_BASE_URL", cfg.base_url)
+        cfg.model = os.environ.get("SHEPHERD_JUDGE_MODEL", cfg.model)
+        cfg.api_key = os.environ.get("SHEPHERD_JUDGE_API_KEY", cfg.api_key)
+        cfg.timeout = float(os.environ.get("SHEPHERD_JUDGE_TIMEOUT", cfg.timeout))
+        return cfg
+
+
+@dataclass
+class PolicyConfig:
+    """When the supervisor wakes up, and how aggressive it is."""
+
+    nudge_threshold: float = 0.60
+    block_threshold: float = 0.85
+    wake_every_n_steps: int = 4
+    max_guidance_tokens: int = 500
+    fail_open: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> PolicyConfig:
+        data = data or {}
+        return cls(
+            nudge_threshold=float(data.get("nudge_threshold", 0.60)),
+            block_threshold=float(data.get("block_threshold", 0.85)),
+            wake_every_n_steps=int(data.get("wake_every_n_steps", 4)),
+            max_guidance_tokens=int(data.get("max_guidance_tokens", 500)),
+            fail_open=bool(data.get("fail_open", True)),
+        )
+
+
+@dataclass
+class AgentConfig:
+    """Per-agent enable/disable and adapter-specific options."""
+
+    enabled: bool = True
+    block_enabled: bool = False
+    options: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> AgentConfig:
+        data = data or {}
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            block_enabled=bool(data.get("block_enabled", False)),
+            options=dict(data.get("options", {})),
+        )
+
+
+@dataclass
+class ShepherdConfig:
+    judge: JudgeConfig
+    policy: PolicyConfig
+    agents: dict[str, AgentConfig]
+    port: int = 4890
+
+    @classmethod
+    def load(cls, path: Path | str | None = None) -> ShepherdConfig:
+        """Load config from ``~/.shepherd/config.yaml`` or a given path."""
+        path = Path(path) if path else Path.home() / ".shepherd" / "config.yaml"
+        data: dict[str, Any] = {}
+        if path.exists():
+            with open(path, encoding="utf-8") as fh:
+                loaded = yaml.safe_load(fh)
+                data = loaded if isinstance(loaded, dict) else {}
+
+        agents_raw = data.get("agents", {})
+        agents = {
+            name: AgentConfig.from_dict(raw)
+            for name, raw in agents_raw.items()
+        } if isinstance(agents_raw, dict) else {}
+
+        return cls(
+            judge=JudgeConfig.from_dict(data.get("judge")),
+            policy=PolicyConfig.from_dict(data.get("policy")),
+            agents=agents,
+            port=int(data.get("port", 4890)),
+        )
+
+    def agent_config(self, agent: str) -> AgentConfig:
+        return self.agents.get(agent, AgentConfig())
+
+    def ensure_defaults(self) -> None:
+        """Create a starter config file if none exists (idempotent)."""
+        path = Path.home() / ".shepherd" / "config.yaml"
+        if path.exists():
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        starter = {
+            "judge": {
+                "backend": "agnes",
+                "base_url": "https://apihub.agnes-ai.com/v1",
+                "model": "agnes-3.0-flash",
+                "api_key": "${SHEPHERD_JUDGE_API_KEY}",
+                "timeout": 30,
+            },
+            "policy": {
+                "nudge_threshold": 0.6,
+                "block_threshold": 0.85,
+                "wake_every_n_steps": 4,
+                "max_guidance_tokens": 500,
+                "fail_open": True,
+            },
+            "agents": {
+                "qwenpaw": {"enabled": True, "block_enabled": False},
+                "claude": {"enabled": True, "block_enabled": False},
+                "codex": {"enabled": True, "block_enabled": False},
+            },
+            "port": 4890,
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(starter, fh, sort_keys=False, allow_unicode=True)
