@@ -1,5 +1,7 @@
 # agent-shepherd
 
+[![CI](https://github.com/CallMeHFK/agent-shepherd/actions/workflows/ci.yml/badge.svg)](https://github.com/CallMeHFK/agent-shepherd/actions)
+
 A supervisor plugin that observes AI agents (**QwenPaw**, **Claude Code**, **Codex**) while they reason and execute tools, and injects concise corrective guidance when they drift off course.
 
 The supervisor is a two-tier policy engine:
@@ -100,6 +102,19 @@ shepherd tail qwenpaw <session-id>
 ```bash
 uv run pytest -q
 ```
+
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for the
+development setup, adapter/detector conventions, commit and PR guidelines, and the
+strict no-real-secrets rule. Quick start:
+
+```bash
+uv sync --all-extras && uv run pytest -q && uv run ruff check .
+```
+
+Interactions in this project are governed by our
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
