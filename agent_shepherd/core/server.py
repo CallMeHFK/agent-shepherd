@@ -8,9 +8,11 @@ verdict to the append-only ledger.
 
 The policy engine is a two-tier pipeline:
 
-1. **Tier 0 — deterministic detectors** (zero cost, always on): loop detection,
-   regression detection, off-spec edits, context rot. These decide *when* the
-   LLM judge wakes up.
+1. **Tier 0 — deterministic detectors** (zero cost, always on): loop detection
+   (exact and near-duplicate), regression detection, off-spec edits, context
+   rot, and sustained-drift detection (a CUSUM alarm with a calibrated
+   false-alarm budget). The drift detector's rising statistic also soft-triggers
+   the judge between checkpoints.
 2. **Tier 1 — LLM step scorer** (PRM-style, sliding window): the judge scores
    the recent steps on on-goal / justified / verified and returns a drift score
    plus actionable guidance.
@@ -33,6 +35,7 @@ from .judge.tier1 import StepScorer
 from .ledger import Ledger
 from .rules.detectors import (
     ContextRotDetector,
+    CUSUMDriftDetector,
     Detector,
     LoopDetector,
     OffSpecDetector,
@@ -60,12 +63,19 @@ class PolicyEngine:
     def __init__(self, config: ShepherdConfig, ledger: Ledger):
         self.config = config
         self.ledger = ledger
+        # Specific pattern detectors first; the CUSUM drift detector last, so a
+        # sharp local pattern (a loop, a regression) is reported with its
+        # precise diagnosis rather than the coarser "sustained drift" message.
         self.detectors: list[Detector] = [
             LoopDetector(),
             RegressionDetector(),
             OffSpecDetector(),
             ContextRotDetector(),
         ]
+        self._drift: CUSUMDriftDetector | None = None
+        if config.policy.drift_enabled:
+            self._drift = CUSUMDriftDetector(target_fpr=config.policy.drift_target_fpr)
+            self.detectors.append(self._drift)
         self.scorer = StepScorer(config.judge)
         self._sessions: dict[tuple[str, str], SessionState] = {}
         # Verdicts that fired inline on an event the adapter can't act on
@@ -89,20 +99,28 @@ class PolicyEngine:
             if verdict.action != VerdictAction.PASS:
                 self._pending[key] = verdict
 
-    def _wake(self, agent: Agent, event: AgentEvent) -> bool:
-        """Deterministic gate: should the LLM judge wake up for this event?"""
-        n = self.config.policy.wake_every_n_steps
-        if event.event in (
-            EventType.PROMPT_SUBMIT,
-            EventType.ITERATION_END,
-            EventType.STOP,
-            EventType.TOOL_RESULT,
-        ):
+    def _wake(self, agent: Agent, event: AgentEvent, history: list[AgentEvent]) -> bool:
+        """Deterministic gate: should the LLM judge wake up for this event?
+
+        The gate is onset-based rather than a fixed threshold on state. The
+        judge wakes:
+
+        * at natural checkpoints (prompt start, iteration end, session stop),
+          where a full review of the window is cheap and meaningful;
+        * mid-iteration, only when the cheap CUSUM drift statistic climbs to
+          ``drift_watch_fraction`` of its alarm line on a tool result — i.e.
+          on evidence of *onset*, not on state that stays high.
+
+        Waking on every tool event is the "state-saturation trap": a judge that
+        reviews a large constant fraction of actions costs more than the agent
+        it supervises, so the expensive reviewer must stay asleep except when
+        something actually starts to happen.
+        """
+        if event.event in (EventType.PROMPT_SUBMIT, EventType.ITERATION_END, EventType.STOP):
             return True
-        if event.iteration % n == 0:
-            return True
-        # Always wake for tool calls that look like they might be a loop.
-        return event.event == EventType.TOOL_CALL and event.tool is not None
+        if event.event == EventType.TOOL_RESULT and self._drift is not None:
+            return self._drift.watch_level(event, history) >= self.config.policy.drift_watch_fraction
+        return False
 
     def _run_detectors(self, event: AgentEvent, history: list[AgentEvent]) -> Verdict | None:
         """Run all Tier 0 detectors; return the first (highest priority) hit.
@@ -159,7 +177,7 @@ class PolicyEngine:
             return verdict
 
         # Tier 1 only when the deterministic gate says "wake up".
-        if self._wake(event.agent, event):
+        if self._wake(event.agent, event, history):
             verdict = self._score(event, history)
             if verdict is not None:
                 self.ledger.record_verdict(event.agent, event.session_id, verdict)

@@ -58,13 +58,29 @@ class JudgeConfig:
 
 @dataclass
 class PolicyConfig:
-    """When the supervisor wakes up, and how aggressive it is."""
+    """When the supervisor wakes up, and how aggressive it is.
+
+    The judge (Tier 1) wakes at natural checkpoints — prompt start, iteration
+    end, session stop — and, mid-iteration, only when the cheap CUSUM drift
+    statistic climbs toward its alarm line. This onset-based gating avoids the
+    "state-saturation trap": a fixed threshold on cumulative state fires on a
+    large constant fraction of actions, so the judge's cost ends up exceeding
+    the agent's.
+    """
 
     nudge_threshold: float = 0.60
     block_threshold: float = 0.85
-    wake_every_n_steps: int = 4
     max_guidance_tokens: int = 500
     fail_open: bool = True
+    # CUSUM drift detector (Tier 0). Its alarm threshold is calibrated by
+    # Monte-Carlo simulation so the per-window false-alarm rate stays at or
+    # below ``drift_target_fpr``.
+    drift_enabled: bool = True
+    drift_target_fpr: float = 0.05
+    # Soft trigger: when the CUSUM statistic reaches this fraction of its
+    # alarm line on a tool result, wake the LLM judge early. 1.0 disables the
+    # soft trigger (the judge wakes only at checkpoints).
+    drift_watch_fraction: float = 0.6
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> PolicyConfig:
@@ -72,9 +88,11 @@ class PolicyConfig:
         return cls(
             nudge_threshold=float(data.get("nudge_threshold", 0.60)),
             block_threshold=float(data.get("block_threshold", 0.85)),
-            wake_every_n_steps=int(data.get("wake_every_n_steps", 4)),
             max_guidance_tokens=int(data.get("max_guidance_tokens", 500)),
             fail_open=bool(data.get("fail_open", True)),
+            drift_enabled=bool(data.get("drift_enabled", True)),
+            drift_target_fpr=float(data.get("drift_target_fpr", 0.05)),
+            drift_watch_fraction=float(data.get("drift_watch_fraction", 0.6)),
         )
 
 
@@ -146,9 +164,11 @@ class ShepherdConfig:
             "policy": {
                 "nudge_threshold": 0.6,
                 "block_threshold": 0.85,
-                "wake_every_n_steps": 4,
                 "max_guidance_tokens": 500,
                 "fail_open": True,
+                "drift_enabled": True,
+                "drift_target_fpr": 0.05,
+                "drift_watch_fraction": 0.6,
             },
             "agents": {
                 "qwenpaw": {"enabled": True, "block_enabled": False},

@@ -6,6 +6,7 @@ import time
 
 from agent_shepherd.core.rules.detectors import (
     ContextRotDetector,
+    CUSUMDriftDetector,
     LoopDetector,
     OffSpecDetector,
     RegressionDetector,
@@ -110,3 +111,59 @@ def test_context_rot_stays_silent_while_tools_are_making_progress():
     ]
     verdict = detector.evaluate(history[-1], history[:-1])
     assert verdict is None
+
+
+def test_loop_detector_fires_on_near_duplicate_calls():
+    """Retrying the same command with slightly tweaked arguments is the more
+    common real-world loop; near-duplicate matching catches it."""
+    detector = LoopDetector(window=8, threshold=3)
+    base = "pytest tests/test_foo.py -k bar"
+    history = [
+        ev(event=EventType.TOOL_CALL, tool=ToolCall(name="shell", input={"cmd": base}), iteration=1),
+        ev(event=EventType.TOOL_CALL, tool=ToolCall(name="shell", input={"cmd": base + " --tb=short"}), iteration=2),
+    ]
+    current = ev(
+        event=EventType.TOOL_CALL, tool=ToolCall(name="shell", input={"cmd": base + " --tb=short"}), iteration=3
+    )
+    verdict = detector.evaluate(current, history)
+    assert verdict is not None
+    assert verdict.action == VerdictAction.NUDGE
+    assert "near-identical" in verdict.reason
+
+
+def test_drift_detector_stays_silent_on_healthy_stream_with_isolated_failures():
+    """A healthy session with an occasional failing call must not alarm."""
+    detector = CUSUMDriftDetector()
+    history = []
+    for i in range(40):
+        result = "error: boom" if i in (5, 17) else "ok"
+        event = ev(event=EventType.TOOL_RESULT, tool=ToolCall(name="shell"), result=result, iteration=i)
+        assert detector.evaluate(event, history) is None
+        history.append(event)
+
+
+def test_drift_detector_fires_on_sustained_failures():
+    detector = CUSUMDriftDetector()
+    history = []
+    fired_at = None
+    for i in range(10):
+        event = ev(event=EventType.TOOL_RESULT, tool=ToolCall(name="shell"), result="error: boom", iteration=i)
+        if detector.evaluate(event, history) is not None:
+            fired_at = i
+            break
+        history.append(event)
+    # A sustained run is caught within one window, well before it fills up.
+    assert fired_at is not None
+    assert fired_at < detector.window
+
+
+def test_drift_detector_watch_level_tracks_consecutive_failures():
+    """The soft trigger: one isolated failure stays below the watch fraction
+    (default 0.6); two consecutive push the statistic to the alarm line."""
+    detector = CUSUMDriftDetector()
+    bad = ev(event=EventType.TOOL_RESULT, tool=ToolCall(name="shell"), result="error: x")
+    one = detector.watch_level(bad, [])
+    two = detector.watch_level(bad, [bad])
+    assert 0 < one < 0.6 <= two
+    # The calibrated threshold keeps false alarms within the 5% budget.
+    assert detector.threshold > 0.1

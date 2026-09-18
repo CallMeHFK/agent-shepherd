@@ -39,7 +39,7 @@ or the `api_key` field of that config.
 ## Repository layout
 
 - `agent_shepherd/core/` — the supervisor daemon and policy engine
-  - `rules/detectors.py` — Tier 0 deterministic detectors (loop, regression, off-spec, context rot)
+  - `rules/detectors.py` — Tier 0 deterministic detectors (loop, near-duplicate loop, regression, off-spec, context rot, CUSUM drift)
   - `judge/` — Tier 1 LLM step scorer (OpenAI-compatible client, prompts)
   - `server.py` — HTTP API and the ingest → policy → verdict loop
   - `ledger.py` — append-only per-session JSONL ledger
@@ -54,8 +54,10 @@ or the `api_key` field of that config.
 
 ## Adding a Tier 0 detector
 
-Detectors are zero-cost deterministic rules that decide when the LLM judge should
-wake up. Conventions:
+Detectors are zero-cost deterministic rules. Most simply return a verdict; the
+CUSUM drift detector additionally exposes a `watch_level` the policy engine
+uses as a *soft* trigger to wake the LLM judge early, without raising a full
+verdict. Conventions:
 
 - Put the class in `agent_shepherd/core/rules/detectors.py` and implement
   `evaluate(event, history) -> Verdict | None`.
@@ -64,7 +66,12 @@ wake up. Conventions:
   `count = 1 + sum(...)`); a detector that relies on the current event being in
   `history` will fire one step too late.
 - Keep detectors synchronous, pure, and stateless. Per-session state lives in the
-  server, never in the detector.
+  server, never in the detector. (The CUSUM detector's alarm threshold is
+  calibrated once in `__init__` from seeded Monte-Carlo simulation and memoized —
+  evaluation itself stays a pure function of `(event, history)`.)
+- If a detector exposes a soft trigger, wire its `watch_level` into
+  `PolicyEngine._wake` and gate it behind a `PolicyConfig` flag so it can be
+  disabled.
 - Add unit tests in `tests/test_detectors.py`; at minimum cover "fires on the Nth
   occurrence and not on the N-1th".
 

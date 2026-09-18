@@ -6,8 +6,10 @@ A supervisor plugin that observes AI agents (**QwenPaw**, **Claude Code**, **Cod
 
 The supervisor is a two-tier policy engine:
 
-1. **Tier 0 — deterministic detectors** (zero cost, always on): loop detection, regression detection, off-spec edits, context rot. These decide *when* the LLM judge wakes up.
-2. **Tier 1 — LLM step scorer** (PRM-style, sliding window): scores the recent steps on on-goal / justified / verified and returns actionable guidance.
+1. **Tier 0 — deterministic detectors** (zero cost, always on): loop detection (exact and near-duplicate calls), regression detection, off-spec edits, context rot, and sustained **drift** — a CUSUM alarm over a cheap failure signal whose threshold is calibrated by Monte-Carlo simulation to a 5% per-window false-alarm budget.
+2. **Tier 1 — LLM step scorer** (PRM-style, sliding window): scores each recent step on on-goal / justified / verified, names the step where the trajectory drifted, and returns actionable guidance. The judge wakes at natural checkpoints (prompt start, iteration end, session stop) and — mid-iteration — only when the CUSUM statistic climbs toward its alarm line, so the expensive reviewer stays asleep while the agent is healthy.
+
+The design decisions above, and the papers that motivate them, are recorded in [RESEARCH_NOTES.md](RESEARCH_NOTES.md).
 
 The judge model backend is pluggable: **Agnes** (`agnes-3.0-flash` via the Agnes AI Hub, OpenAI-compatible) is the default, and any OpenAI-compatible endpoint (local **vLLM**, cc-switch, etc.) works by setting `SHEPHERD_JUDGE_BASE_URL` / `SHEPHERD_JUDGE_MODEL`.
 
@@ -30,9 +32,11 @@ judge:
 policy:
   nudge_threshold: 0.6
   block_threshold: 0.85
-  wake_every_n_steps: 4
   max_guidance_tokens: 500
   fail_open: true
+  drift_enabled: true
+  drift_target_fpr: 0.05
+  drift_watch_fraction: 0.6
 agents:
   qwenpaw: {enabled: true, block_enabled: false}
   claude: {enabled: true, block_enabled: false}
