@@ -6,7 +6,7 @@ A supervisor plugin that observes AI agents (**QwenPaw**, **Claude Code**, **Cod
 
 The supervisor is a two-tier policy engine:
 
-1. **Tier 0 — deterministic detectors** (zero cost, always on): loop detection (exact and near-duplicate calls), regression detection, off-spec edits, context rot, and sustained **drift** — a CUSUM alarm over a cheap failure signal whose threshold is calibrated by Monte-Carlo simulation to a 5% per-window false-alarm budget.
+1. **Tier 0 — deterministic detectors** (zero cost, always on): loop detection (exact and near-duplicate calls), regression detection, off-spec edits, context rot (requires a sustained wall-clock quiet stretch, so quick streaming output never trips it), and sustained **drift** — a CUSUM alarm over a cheap failure signal whose threshold is calibrated by Monte-Carlo simulation to a 5% per-window false-alarm budget. Repeat NUDGEs from the same detector within a session are suppressed until `nudge_cooldown_seconds` has elapsed (hysteresis), so a detected condition does not nag the agent on every subsequent event.
 2. **Tier 1 — LLM step scorer** (PRM-style, sliding window): scores each recent step on on-goal / justified / verified, names the step where the trajectory drifted, and returns actionable guidance. The judge wakes at natural checkpoints (prompt start, iteration end, session stop) and — mid-iteration — only when the CUSUM statistic climbs toward its alarm line, so the expensive reviewer stays asleep while the agent is healthy.
 
 The design decisions above, and the papers that motivate them, are recorded in [RESEARCH_NOTES.md](RESEARCH_NOTES.md).
@@ -34,6 +34,7 @@ policy:
   block_threshold: 0.85
   max_guidance_tokens: 500
   fail_open: true
+  nudge_cooldown_seconds: 300
   drift_enabled: true
   drift_target_fpr: 0.05
   drift_watch_fraction: 0.6

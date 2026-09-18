@@ -12,7 +12,9 @@ The policy engine is a two-tier pipeline:
    (exact and near-duplicate), regression detection, off-spec edits, context
    rot, and sustained-drift detection (a CUSUM alarm with a calibrated
    false-alarm budget). The drift detector's rising statistic also soft-triggers
-   the judge between checkpoints.
+   the judge between checkpoints. Repeat NUDGEs from the same detector are
+   suppressed per session for ``nudge_cooldown_seconds`` (hysteresis), so a
+   firing detector does not re-nag the agent while the situation is unchanged.
 2. **Tier 1 — LLM step scorer** (PRM-style, sliding window): the judge scores
    the recent steps on on-goal / justified / verified and returns a drift score
    plus actionable guidance.
@@ -50,6 +52,10 @@ class SessionState:
 
     events: list[AgentEvent] = field(default_factory=list)
     max_events: int = 60
+    # Per-detector timestamp of the last admitted NUDGE; drives the cooldown
+    # (hysteresis) so a detector does not re-nag the agent with the same
+    # verdict while the situation is unchanged.
+    last_nudge: dict[str, float] = field(default_factory=dict)
 
     def push(self, event: AgentEvent) -> None:
         self.events.append(event)
@@ -98,6 +104,24 @@ class PolicyEngine:
         with self._lock:
             if verdict.action != VerdictAction.PASS:
                 self._pending[key] = verdict
+
+    def _admit(self, state: SessionState, event: AgentEvent, verdict: Verdict) -> Verdict | None:
+        """Apply the per-detector NUDGE cooldown (hysteresis).
+
+        A repeat NUDGE from the same detector for the same session, within
+        ``nudge_cooldown_seconds``, is suppressed — the agent already has that
+        guidance in its context, and re-nagging is the "saturation trap" in
+        action. ``None`` means "suppressed, stay silent"; otherwise the
+        verdict is admitted and its cooldown clock is (re)started.
+        BLOCK/ESCALATE/PASS are never suppressed.
+        """
+        if verdict.action != VerdictAction.NUDGE:
+            return verdict
+        last = state.last_nudge.get(verdict.detector)
+        if last is not None and event.ts - last < self.config.policy.nudge_cooldown_seconds:
+            return None
+        state.last_nudge[verdict.detector] = event.ts
+        return verdict
 
     def _wake(self, agent: Agent, event: AgentEvent, history: list[AgentEvent]) -> bool:
         """Deterministic gate: should the LLM judge wake up for this event?
@@ -172,6 +196,16 @@ class PolicyEngine:
         # Tier 0 first: deterministic signals are cheap and always on.
         verdict = self._run_detectors(event, history)
         if verdict is not None:
+            if self._admit(state, event, verdict) is None:
+                # Repeat nudge within the cooldown: stay silent, and record
+                # the suppression so the ledger shows the hysteresis worked.
+                suppressed = Verdict(
+                    action=VerdictAction.PASS,
+                    reason=f"{verdict.detector} nudge suppressed (cooldown)",
+                    confidence=0.0,
+                )
+                self.ledger.record_verdict(event.agent, event.session_id, suppressed)
+                return suppressed
             self.ledger.record_verdict(event.agent, event.session_id, verdict)
             self._park(key, verdict)
             return verdict
@@ -180,6 +214,14 @@ class PolicyEngine:
         if self._wake(event.agent, event, history):
             verdict = self._score(event, history)
             if verdict is not None:
+                if self._admit(state, event, verdict) is None:
+                    suppressed = Verdict(
+                        action=VerdictAction.PASS,
+                        reason="judge nudge suppressed (cooldown)",
+                        confidence=0.0,
+                    )
+                    self.ledger.record_verdict(event.agent, event.session_id, suppressed)
+                    return suppressed
                 self.ledger.record_verdict(event.agent, event.session_id, verdict)
                 self._park(key, verdict)
                 return verdict

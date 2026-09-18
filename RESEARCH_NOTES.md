@@ -117,6 +117,29 @@ JSON output shape is unchanged, so `parse_verdict` is untouched.
   underused; the goal (the judge's drift reference frame) is the one thing
   that must not sit in the middle, so it is pinned to the top.
 
+### 5. Anti-nagging hysteresis + wall-clock quiet for context rot
+
+**What changed:** two anti-saturation measures, both motivated by live
+operation. (a) **Nudge cooldown (hysteresis):** the policy engine tracks the
+last NUDGE timestamp per detector per session; a NUDGE from the same detector
+within `policy.nudge_cooldown_seconds` (default 300s) is suppressed (logged
+as a PASS with a "suppressed (cooldown)" reason). BLOCK/ESCALATE are never
+suppressed and never touch the cooldown. (b) **Wall-clock quiet requirement:**
+the context-rot detector now requires the agent to have been *quiet* (no tool
+activity observed in a 64-event lookback) for at least `min_quiet_seconds`
+(60s) in wall-clock time before it flags.
+
+**Why:**
+- *State-saturation trap* — <https://arxiv.org/abs/2606.04296> (see item 2):
+  a fixed state threshold fires on a constant fraction of actions for as long
+  as the condition holds. We watched exactly this happen in production: after
+  the item-2 fixes, a long QwenPaw background-task wait (reasoning while
+  polling a sleeping task) produced **62,165 identical context-rot nudges** in
+  one session's ledger. The wall-clock quiet check makes "rot" a property of
+  time, not event count — fast streaming deltas no longer look like spinning —
+  and the cooldown makes even a genuine sustained condition cost one nudge per
+  5 minutes instead of one per event.
+
 ## Honest caveats (negative results we did NOT ignore)
 
 - *Sample More, Reflect Less* — <https://arxiv.org/abs/2607.28576> — at equal

@@ -72,6 +72,11 @@ verdict. Conventions:
 - If a detector exposes a soft trigger, wire its `watch_level` into
   `PolicyEngine._wake` and gate it behind a `PolicyConfig` flag so it can be
   disabled.
+- Deduplication is the server's job, not the detector's: a NUDGE verdict is
+  suppressed while `policy.nudge_cooldown_seconds` have not elapsed since the
+  same detector last nudged that session (hysteresis). A detector may
+  therefore fire on every matching event — the engine repeats it only after
+  the cooldown. BLOCK/ESCALATE are never suppressed.
 - Add unit tests in `tests/test_detectors.py`; at minimum cover "fires on the Nth
   occurrence and not on the N-1th".
 

@@ -22,12 +22,13 @@ def ev(
     reasoning: str | None = None,
     prompt: str | None = None,
     iteration: int = 1,
+    ts: float | None = None,
 ) -> AgentEvent:
     return AgentEvent(
         agent=Agent.QWENPAW,
         session_id="s1",
         event=event,
-        ts=time.time(),
+        ts=ts if ts is not None else time.time(),
         iteration=iteration,
         tool=tool,
         tool_result=result,
@@ -91,13 +92,26 @@ def test_offspec_detector_fires_on_unrelated_edits():
 
 def test_context_rot_detector_fires_on_long_reasoning():
     detector = ContextRotDetector(max_reasoning_chars=100, max_consecutive_reasoning=4)
+    base = 1_000_000.0
     history = [
-        ev(event=EventType.REASONING, reasoning="x" * 30, iteration=i)
+        ev(event=EventType.REASONING, reasoning="x" * 30, iteration=i, ts=base + 30.0 * i)
         for i in range(1, 5)
     ]
     verdict = detector.evaluate(history[-1], history[:-1])
     assert verdict is not None
     assert verdict.action == VerdictAction.NUDGE
+
+
+def test_context_rot_stays_silent_on_quick_streaming():
+    """Fast streaming deltas (seconds apart) are normal thinking, not rot:
+    the quiet stretch has to be sustained in wall-clock time."""
+    detector = ContextRotDetector(max_reasoning_chars=100, max_consecutive_reasoning=4)
+    base = 1_000_000.0
+    history = [
+        ev(event=EventType.REASONING, reasoning="x" * 30, iteration=i, ts=base + 2.0 * i)
+        for i in range(1, 5)
+    ]
+    assert detector.evaluate(history[-1], history[:-1]) is None
 
 
 def test_context_rot_stays_silent_while_tools_are_making_progress():

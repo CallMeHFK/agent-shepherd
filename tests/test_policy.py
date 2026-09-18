@@ -105,7 +105,7 @@ def test_loop_detector_fires_on_third_identical_call_not_second():
             agent=Agent.QWENPAW,
             session_id="s4",
             event=EventType.TOOL_CALL,
-            ts=time.time(),
+            ts=1_000_000.0 + i * 600.0,  # spaced out: the 4th call is past the nudge cooldown
             iteration=i,
             tool=tool,
         )
@@ -187,12 +187,12 @@ def _engine_and_scorer(root: str, policy=None):
     return engine, scorer
 
 
-def _result(session_id: str, result: str, iteration: int = 1):
+def _result(session_id: str, result: str, iteration: int = 1, ts: float | None = None):
     return AgentEvent(
         agent=Agent.CLAUDE,
         session_id=session_id,
         event=EventType.TOOL_RESULT,
-        ts=time.time(),
+        ts=ts if ts is not None else time.time(),
         iteration=iteration,
         tool=None,
         tool_result=result,
@@ -243,11 +243,48 @@ def test_drift_hard_alarm_preempts_scorer():
     )
     verdict = None
     for i in range(4):
-        verdict = engine.process(_result("wd2", "error: boom", iteration=i))
+        verdict = engine.process(_result("wd2", "error: boom", iteration=i, ts=1_000_000.0 + i * 600.0))
     assert verdict is not None
     assert verdict.action == VerdictAction.NUDGE
     assert verdict.detector == "drift"
     assert scorer.calls == 0
+
+
+def test_repeat_nudge_is_suppressed_by_cooldown():
+    """Hysteresis: a detector that just nudged the session stays silent until
+    the cooldown elapses; after the cooldown the same condition fires again."""
+    from agent_shepherd.core.types import ToolCall
+
+    engine, _ = _engine_and_scorer("/tmp/shepherd-test-cooldown")
+    tool = ToolCall(name="shell", input={"cmd": "echo hi"})
+
+    def call(i: int) -> AgentEvent:
+        return AgentEvent(
+            agent=Agent.QWENPAW,
+            session_id="cd1",
+            event=EventType.TOOL_CALL,
+            ts=1_000_000.0 + i * 10.0,
+            iteration=i,
+            tool=tool,
+        )
+
+    # 1st and 2nd identical calls are below the loop threshold.
+    assert engine.process(call(0)).action == VerdictAction.PASS
+    assert engine.process(call(1)).action == VerdictAction.PASS
+    # 3rd call: the loop detector fires (first admission of the session).
+    assert engine.process(call(2)).action == VerdictAction.NUDGE
+    # 4th call 10s later: the detector still fires, but the cooldown suppresses it.
+    assert engine.process(call(3)).action == VerdictAction.PASS
+    # After the 300s cooldown elapses the same condition is admitted again.
+    late = AgentEvent(
+        agent=Agent.QWENPAW,
+        session_id="cd1",
+        event=EventType.TOOL_CALL,
+        ts=1_000_000.0 + 33 * 10.0,  # 310s after the admitted nudge
+        iteration=33,
+        tool=tool,
+    )
+    assert engine.process(late).action == VerdictAction.NUDGE
 
 
 def test_soft_wake_disabled_when_drift_detector_is_off():

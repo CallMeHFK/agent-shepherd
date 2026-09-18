@@ -232,14 +232,32 @@ class ContextRotDetector(Detector):
     If the agent produces a long reasoning chunk (or a long sequence of
     reasoning chunks) without a tool call or a user-visible result, the session
     is likely spinning. Flag it so the judge can step in.
+
+    "Rot" is a property of wall-clock time, not of event count: a model can
+    stream several quick reasoning deltas in a few seconds while thinking
+    normally. The detector therefore requires the agent to have been *quiet*
+    (no tool activity observed) for at least ``min_quiet_seconds`` before it
+    will flag. Without this, a state-threshold detector saturates — it fires
+    on a constant fraction of events for as long as the quiet stretch lasts
+    (the "saturation trap"), which in live operation produced tens of
+    thousands of identical nudges per session.
     """
 
     name = "contextrot"
 
-    def __init__(self, max_reasoning_chars: int = 4000, max_consecutive_reasoning: int = 4, window: int = 8):
+    def __init__(
+        self,
+        max_reasoning_chars: int = 4000,
+        max_consecutive_reasoning: int = 4,
+        window: int = 8,
+        min_quiet_seconds: float = 60.0,
+        quiet_lookback: int = 64,
+    ):
         self.max_reasoning_chars = max_reasoning_chars
         self.max_consecutive_reasoning = max_consecutive_reasoning
         self.window = window
+        self.min_quiet_seconds = min_quiet_seconds
+        self.quiet_lookback = quiet_lookback
 
     def evaluate(self, event: AgentEvent, history: list[AgentEvent]) -> Verdict | None:
         if event.event != EventType.REASONING or not event.reasoning:
@@ -249,6 +267,15 @@ class ContextRotDetector(Detector):
         # nothing between them. Only flag "context rot" when the agent has
         # actually gone quiet: no tool activity anywhere in the window.
         if any(e.event in (EventType.TOOL_CALL, EventType.TOOL_RESULT) for e in recent):
+            return None
+        # The quiet stretch must be sustained in wall-clock time. Measure from
+        # the most recent tool activity within the lookback (or the start of
+        # the lookback if there was none there — the span is then a lower
+        # bound on the true quiet time).
+        lookback = history[-self.quiet_lookback :]
+        tool_ts = [e.ts for e in lookback if e.event in (EventType.TOOL_CALL, EventType.TOOL_RESULT)]
+        quiet_start = max(tool_ts) if tool_ts else (lookback[0].ts if lookback else event.ts)
+        if event.ts - quiet_start < self.min_quiet_seconds:
             return None
         consecutive = 1  # the current event is itself a reasoning step
         for e in reversed(recent):

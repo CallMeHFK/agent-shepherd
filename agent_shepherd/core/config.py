@@ -72,6 +72,11 @@ class PolicyConfig:
     block_threshold: float = 0.85
     max_guidance_tokens: int = 500
     fail_open: bool = True
+    # Hysteresis: repeat NUDGEs from the same detector (or the judge) for the
+    # same session are suppressed within this window, so the agent is not
+    # re-nagged with a verdict it already received. BLOCK/ESCALATE are never
+    # suppressed.
+    nudge_cooldown_seconds: float = 300.0
     # CUSUM drift detector (Tier 0). Its alarm threshold is calibrated by
     # Monte-Carlo simulation so the per-window false-alarm rate stays at or
     # below ``drift_target_fpr``.
@@ -90,6 +95,7 @@ class PolicyConfig:
             block_threshold=float(data.get("block_threshold", 0.85)),
             max_guidance_tokens=int(data.get("max_guidance_tokens", 500)),
             fail_open=bool(data.get("fail_open", True)),
+            nudge_cooldown_seconds=float(data.get("nudge_cooldown_seconds", 300.0)),
             drift_enabled=bool(data.get("drift_enabled", True)),
             drift_target_fpr=float(data.get("drift_target_fpr", 0.05)),
             drift_watch_fraction=float(data.get("drift_watch_fraction", 0.6)),
@@ -166,6 +172,7 @@ class ShepherdConfig:
                 "block_threshold": 0.85,
                 "max_guidance_tokens": 500,
                 "fail_open": True,
+                "nudge_cooldown_seconds": 300,
                 "drift_enabled": True,
                 "drift_target_fpr": 0.05,
                 "drift_watch_fraction": 0.6,
