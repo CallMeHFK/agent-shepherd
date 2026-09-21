@@ -83,9 +83,22 @@ class JudgeClient:
                     text = text[4:].strip()
             obj = json.loads(text)
             action = VerdictAction(str(obj.get("action", "pass")))
+            reason = str(obj.get("reason", "judge found drift"))
+            # Verbal process supervision: the per-step critiques are the part the
+            # agent can act on, so they ride along in the reason rather than being
+            # parsed into a structure nobody reads.
+            critiques = obj.get("critique")
+            if isinstance(critiques, list):
+                notes = [
+                    f"step {int(item.get('step', 0))}: {str(item.get('says', '')).strip()}"
+                    for item in critiques
+                    if isinstance(item, dict) and item.get("says")
+                ]
+                if notes:
+                    reason = reason + " | " + "; ".join(notes[:3])
             return Verdict(
                 action=action,
-                reason=str(obj.get("reason", "judge found drift")),
+                reason=reason,
                 guidance=obj.get("guidance"),
                 confidence=float(obj.get("confidence", 0.5)),
                 detector="judge",
