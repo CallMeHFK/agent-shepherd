@@ -15,12 +15,14 @@ import json
 import random
 import re
 from abc import ABC, abstractmethod
+from fnmatch import fnmatch
 
 from ..types import AgentEvent, EventType, Verdict, VerdictAction
+from . import signals
 
-# Markers that indicate a tool result was a failure. Shared by the regression
-# and drift detectors so they agree on what "failed" means.
-_FAILURE_MARKERS = ("failed", "error", "exception", "traceback", "exit code: 1", "non-zero", "no such file")
+_EDIT_TOOLS = {"write_file", "edit_file", "str_replace", "patch", "Write", "Edit", "MultiEdit", "NotebookEdit"}
+_PATH_KEYS = ("path", "file_path", "notebook_path", "filename", "file")
+
 
 
 class Detector(ABC):
@@ -146,16 +148,14 @@ class RegressionDetector(Detector):
     def evaluate(self, event: AgentEvent, history: list[AgentEvent]) -> Verdict | None:
         if not self._is_test_command(event):
             return None
-        result = (event.tool_result or "").lower()
-        failed = any(marker in result for marker in _FAILURE_MARKERS)
-        if not failed:
+        if signals.classify(event).state != signals.FAILED:
             return None
         # Was this same tool successful earlier in the session?
         earlier_success = any(
             e.event == EventType.TOOL_RESULT
             and e.tool is not None
             and e.tool.name == event.tool.name
-            and not any(marker in (e.tool_result or "").lower() for marker in _FAILURE_MARKERS)
+            and signals.classify(e).state == signals.OK
             for e in history
         )
         if earlier_success:
@@ -174,56 +174,179 @@ class RegressionDetector(Detector):
 
 
 class OffSpecDetector(Detector):
-    """Detect file edits that drift outside the user's stated goal.
+    """Detect edits outside the delegation contract for this session.
 
-    Heuristic: if the user prompt mentions specific files/directories (or the
-    session has a declared plan in the prompt), edits to unrelated paths are
-    flagged. If no plan is available, this detector stays silent.
+    The earlier version regexed paths out of the user prompt and flagged any
+    edit not in that set — which both missed real scope violations (the user
+    rarely types every file) and fired on legitimate work (you cannot fix a
+    module without touching a file nobody named).
+
+    This version models the contract explicitly, following the delegation-contract
+    framing (arXiv 2606.17099) and the deterministic-compliance-check result that
+    an SMT/solver-side admissibility check beats asking a model (arXiv
+    2603.20449): a path is admissible if it is named in the goal, matched by a
+    configured allow-pattern, **or was already observed this session** (reading
+    or grepping a file establishes that it is in play). Deny-patterns are checked
+    first and are hard-blocked where the agent has block enabled.
     """
 
     name = "offspec"
 
-    def _mentioned_paths(self, event: AgentEvent) -> set[str]:
-        prompt = (event.prompt or "").lower()
-        paths: set[str] = set()
-        # Very lightweight path extraction from the prompt.
-        import re
+    def __init__(self, allow_globs: list[str] | None = None, deny_globs: list[str] | None = None):
+        self.allow_globs = allow_globs or []
+        self.deny_globs = deny_globs or []
 
-        for match in re.findall(r"(?:^|\s)([./]?[\w.-]+/(?:[\w.-]+/)*[\w.-]+)", prompt):
+    def _mentioned_paths(self, event: AgentEvent) -> set[str]:
+        prompt = event.prompt or ""
+        paths: set[str] = set()
+        for match in re.findall(r"(?:^|\s)([./]?[\w.\-]+/(?:[\w.\-]+/)*[\w.\-]+)", prompt):
             paths.add(match.strip("./").lower())
+        # Also accept bare filenames ("update config.py"), which prompts use often.
+        for match in re.findall(r"\b([\w.\-]+\.[a-zA-Z]{1,5})\b", prompt):
+            paths.add(match.lower())
         return paths
 
-    def _edited_paths(self, event: AgentEvent) -> set[str]:
+    def _edited_path(self, event: AgentEvent) -> str | None:
         if event.event != EventType.TOOL_CALL or event.tool is None:
-            return set()
-        if event.tool.name not in {"write_file", "edit_file", "str_replace", "patch"}:
-            return set()
-        path = event.tool.input.get("path") or event.tool.input.get("file_path")
-        if not path:
-            return set()
-        return {str(path).strip("./").lower()}
+            return None
+        if event.tool.name not in _EDIT_TOOLS:
+            return None
+        for key in _PATH_KEYS:
+            value = event.tool.input.get(key)
+            if value:
+                return _clean_path(value)
+        return None
+
+    def _observed_paths(self, history: list[AgentEvent]) -> set[str]:
+        """Paths the agent has already seen results for — in-play, not out of scope."""
+        seen: set[str] = set()
+        for e in history:
+            if e.tool is None:
+                continue
+            for key in _PATH_KEYS:
+                value = e.tool.input.get(key)
+                if value:
+                    seen.add(_clean_path(value))
+            for token in re.findall(r"[\w.\-]+/[\w./\-]+", e.tool_result or ""):
+                seen.add(_clean_path(token))
+        return seen
 
     def evaluate(self, event: AgentEvent, history: list[AgentEvent]) -> Verdict | None:
-        mentioned = self._mentioned_paths(event)
-        edited = self._edited_paths(event)
-        if not mentioned or not edited:
+        edited = self._edited_path(event)
+        if not edited:
             return None
-        # Flag edits to paths not mentioned in the goal.
-        unrelated = edited - mentioned
-        if unrelated:
+        if any(fnmatch(edited, g) or fnmatch(f"/{edited}", g) for g in self.deny_globs):
+            return Verdict(
+                action=VerdictAction.BLOCK,
+                reason=f"out-of-contract edit: '{edited}' matches a configured deny-pattern",
+                guidance=(
+                    f"'{edited}' is explicitly outside the permitted scope for this "
+                    "session. Do not edit it; ask the user if the scope needs to change."
+                ),
+                confidence=0.95,
+                detector=self.name,
+            )
+        in_scope = (
+            edited in self._mentioned_paths(event)
+            or edited in self._observed_paths(history)
+            or any(fnmatch(edited, g) or fnmatch(f"/{edited}", g) for g in self.allow_globs)
+        )
+        if in_scope:
+            return None
+        # Nothing named it, nothing read it, nothing allows it.
+        return Verdict(
+            action=VerdictAction.NUDGE,
+            reason=(
+                f"off-spec edit: '{edited}' is outside the stated goal and was never "
+                "read or referenced this session"
+            ),
+            guidance=(
+                f"You are about to edit '{edited}', which the request never named and "
+                "which you have not read or seen referenced in this session. Re-read the "
+                "original request: either confirm in one line why this file is required, "
+                "or go back to the file the goal actually names."
+            ),
+            confidence=0.75,
+            detector=self.name,
+        )
+
+
+class BindingDriftDetector(Detector):
+    """Detect acting on a near-miss sibling of the entity that was resolved.
+
+    *Binding Drift in Multi-Step Tool-Augmented Agents* (arXiv 2607.18316)
+    reports that agents pick the right tool but bind it to the wrong entity a
+    large fraction of the time, and that the error is *silent*: the call succeeds.
+    A loop detector cannot see it (the arguments genuinely differ) and neither
+    can an off-spec check (the path may be in scope).
+
+    The cheap deterministic signature: an edit targeting a path that is highly
+    similar to a path the agent actually inspected, but not that path, with no
+    new observation in between establishing the switch. ``cat config.py`` then
+    ``edit config.py.bak`` is exactly this.
+    """
+
+    name = "binding"
+
+    def __init__(self, similarity: float = 0.6, lookback: int = 24):
+        self.similarity = similarity
+        self.lookback = lookback
+
+    @staticmethod
+    def _tokens(path: str) -> set[str]:
+        return {t for t in re.split(r"[^a-z0-9]+", path.lower()) if len(t) > 1}
+
+    def _sim(self, a: str, b: str) -> float:
+        ta, tb = self._tokens(a), self._tokens(b)
+        if not ta or not tb:
+            return 0.0
+        return len(ta & tb) / len(ta | tb)
+
+    def evaluate(self, event: AgentEvent, history: list[AgentEvent]) -> Verdict | None:
+        if event.event != EventType.TOOL_CALL or event.tool is None:
+            return None
+        if event.tool.name not in _EDIT_TOOLS:
+            return None
+        target = next((_clean_path(event.tool.input[k]) for k in _PATH_KEYS if event.tool.input.get(k)), None)
+        if not target:
+            return None
+        recent = history[-self.lookback :]
+        inspected: set[str] = set()
+        for e in recent:
+            if e.tool is None:
+                continue
+            if e.event == EventType.TOOL_RESULT or e.tool.name not in _EDIT_TOOLS:
+                for k in _PATH_KEYS:
+                    if e.tool.input.get(k):
+                        inspected.add(_clean_path(e.tool.input[k]))
+            if e.event == EventType.TOOL_RESULT and e.tool_result:
+                for token in re.findall(r"[\w.\-]+/[\w./\-]+|[\w.\-]+\.[a-zA-Z]{1,5}", e.tool_result):
+                    inspected.add(_clean_path(token))
+        if target in inspected:
+            return None
+        for seen in inspected:
+            if seen == target or self._sim(seen, target) < self.similarity:
+                continue
             return Verdict(
                 action=VerdictAction.NUDGE,
-                reason="off-spec edit: files outside the user's stated goal are being modified",
-                guidance=(
-                    "You are editing files that are not part of the user's stated "
-                    "goal. Re-read the original request and confirm the scope "
-                    "before continuing. If the edit is necessary, explain why in "
-                    "the next step."
+                reason=(
+                    f"binding drift: editing '{target}' but the session established '{seen}' "
+                    "(similar name, never inspected)"
                 ),
-                confidence=0.75,
+                guidance=(
+                    f"You inspected '{seen}' but are now editing '{target}', a different file "
+                    "with a very similar name. Confirm which one the task means, and read the "
+                    "one you are about to change before changing it."
+                ),
+                confidence=0.8,
                 detector=self.name,
             )
         return None
+
+
+def _clean_path(value: object) -> str:
+    path = str(value).strip().strip("'\"").lower()
+    return path.removeprefix("./")
 
 
 class ContextRotDetector(Detector):
@@ -342,6 +465,10 @@ class CUSUMDriftDetector(Detector):
         target_fpr: float = 0.05,
         seed: int = 1234,
         n_sim: int = 20000,
+        horizon: int = 120,
+        unknown_weight: float = 0.5,
+        adaptive_baseline: bool = True,
+        min_baseline_samples: int = 8,
     ):
         self.window = window
         self.baseline = baseline
@@ -349,88 +476,157 @@ class CUSUMDriftDetector(Detector):
         self.target_fpr = target_fpr
         self.seed = seed
         self.n_sim = n_sim
-        # The Monte-Carlo calibration is pure and seeded, so identical
-        # parameters always yield the same threshold. Cache it so that
-        # repeated construction (e.g. in tests) does not re-run the
-        # simulation.
-        key = (window, baseline, slack, target_fpr, seed, n_sim)
+        self.unknown_weight = unknown_weight
+        # The alarm line is calibrated for a monitoring window, but the engine
+        # re-tests it on every step, so the *session-level* false-alarm rate is
+        # what an agent actually experiences. Calibrating over a horizon of
+        # overlapping windows is the fix for the caveat the earlier design
+        # accepted (see "When Drift Detectors cry Wolf", arXiv 2607.17336).
+        self.horizon = max(horizon, window)
+        self.adaptive_baseline = adaptive_baseline
+        self.min_baseline_samples = min_baseline_samples
+        key = (self.horizon, baseline, slack, target_fpr, seed, n_sim, unknown_weight)
         cached = _CUSUM_THRESHOLD_CACHE.get(key)
         if cached is None:
-            cached = self._calibrate(window, baseline, slack, target_fpr, seed, n_sim)
+            cached = self._calibrate(
+                self.horizon, window, baseline, slack, target_fpr, seed, n_sim, unknown_weight
+            )
             _CUSUM_THRESHOLD_CACHE[key] = cached
         self.threshold = cached
 
+    def _baseline_for(self, reference: list[AgentEvent]) -> float:
+        """Self-starting baseline: the session's own pre-alarm failure rate.
+
+        A fixed ``baseline`` assumes every agent runs in an equally flaky
+        environment, which is false — one agent on a clean repo and one fighting
+        a broken sandbox get different CUSUMs from the same behavior. Once
+        enough results have been seen, the running mean replaces the prior (the
+        self-starting CUSUM idea, arXiv 2410.12736 and 2509.07112).
+
+        The mean is taken over the *reference* history only — everything the
+        session showed before the current monitoring window. Estimating it from
+        the window under alarm is the classic self-normalization trap: a run of
+        pure failures drives the baseline to 1.0, the reference drift to
+        ``1.0 + slack``, and the statistic can never alarm again.
+        """
+        if not self.adaptive_baseline:
+            return self.baseline
+        observed = [self._signal(e) for e in reference if e.event == EventType.TOOL_RESULT]
+        if len(observed) < self.min_baseline_samples:
+            return self.baseline
+        mean = sum(observed) / len(observed)
+        # Never let the baseline collapse to 0: a stretch of clean results would
+        # make the detector scream at the first failure.
+        return max(mean, self.baseline / 2.0)
+
     def _signal(self, event: AgentEvent) -> float:
-        """Cheap 0/1 failure signal: 1.0 if a tool result looks like a failure."""
-        if event.event != EventType.TOOL_RESULT:
-            return 0.0
-        result = (event.tool_result or "").lower()
-        return 1.0 if any(m in result for m in _FAILURE_MARKERS) else 0.0
+        """Graded failure signal from the structured outcome classifier."""
+        outcome = signals.classify(event)
+        if outcome.state == signals.FAILED:
+            return 1.0
+        if outcome.state == signals.UNKNOWN:
+            return self.unknown_weight
+        return 0.0
 
     def _statistic(self, event: AgentEvent, history: list[AgentEvent]) -> float:
         """Recompute the one-sided CUSUM sum over the window ending at ``event``."""
+        window = history[-self.window :]
+        reference = history[: -self.window] if len(history) > self.window else []
+        base = self._baseline_for(reference)
+        slack = self.slack + base
         s = 0.0
-        for e in history[-self.window :]:
-            s = max(0.0, s + (self._signal(e) - self.baseline - self.slack))
-        s = max(0.0, s + (self._signal(event) - self.baseline - self.slack))
+        for e in window:
+            s = max(0.0, s + (self._signal(e) - slack))
+        s = max(0.0, s + (self._signal(event) - slack))
         return s
 
     def _calibrate(
-        self, window: int, baseline: float, slack: float, target_fpr: float, seed: int, n_sim: int
+        self,
+        horizon: int,
+        window: int,
+        baseline: float,
+        slack: float,
+        target_fpr: float,
+        seed: int,
+        n_sim: int,
+        unknown_weight: float,
     ) -> float:
-        """Find the most sensitive alarm threshold that keeps the empirical
-        false-alarm rate within ``target_fpr`` over a ``window``-step horizon.
+        """Find the most sensitive alarm threshold whose false-alarm rate over a
+        whole ``horizon``-step session stays at or below ``target_fpr``.
 
-        Under the null each step is an independent Bernoulli(``baseline``)
-        failure. We binary-search the smallest threshold whose simulated
-        false-alarm rate is at or below the target — i.e. the most sensitive
-        detector the budget allows. The RNG is seeded so the threshold is
-        deterministic and testable.
+        The null model is the graded one the detector actually sees: each step is
+        a failure with probability ``baseline``, an unobservable outcome with
+        probability ``unknown_rate``, and otherwise clean. Calibration runs over
+        the full horizon with the statistic re-tested at every step, which is
+        why the resulting threshold is higher than a single-window calibration
+        would give — and why the long-run alarm budget finally means something.
         """
         rng = random.Random(seed)
+        unknown_rate = max(0.02, min(0.12, baseline))
+        drift = baseline + slack
 
         def false_alarm_rate(h: float) -> float:
             alarms = 0
             for _ in range(n_sim):
                 s = 0.0
-                for _ in range(window):
-                    x = 1.0 if rng.random() < baseline else 0.0
-                    s = max(0.0, s + (x - baseline - slack))
+                for _ in range(horizon):
+                    u = rng.random()
+                    if u < baseline:
+                        x = 1.0
+                    elif u < baseline + unknown_rate:
+                        x = unknown_weight
+                    else:
+                        x = 0.0
+                    s = max(0.0, s + (x - drift))
                     if s >= h:
                         alarms += 1
                         break
             return alarms / n_sim
 
         # FPR is monotone decreasing in h, so the "within budget" region is
-        # h >= h* for some crossing point h*. Binary-search for the *smallest*
-        # h that stays within the budget (the most sensitive detector the
-        # budget allows): if mid is within budget, the crossing is at or below
-        # mid (search down); otherwise it is above (search up). Return the
-        # budget side (hi) so the empirical rate never exceeds the target.
-        lo, hi = 0.1, 5.0
-        for _ in range(20):
+        # h >= h* for some crossing point h*. Binary-search the *smallest* h that
+        # fits the budget (the most sensitive detector the budget allows) and
+        # return the budget side, so the empirical rate never exceeds the target.
+        lo, hi = 0.1, 20.0
+        for _ in range(24):
             mid = (lo + hi) / 2.0
             if false_alarm_rate(mid) <= target_fpr:
-                hi = mid  # within budget: try a more sensitive (lower) threshold
+                hi = mid
             else:
-                lo = mid  # over budget: must raise the threshold
+                lo = mid
         return round(hi, 6)
 
     def evaluate(self, event: AgentEvent, history: list[AgentEvent]) -> Verdict | None:
         s = self._statistic(event, history)
         if s >= self.threshold:
+            window = history[-self.window :] + [event]
+            outcomes = [signals.classify(e) for e in window if e.event == EventType.TOOL_RESULT]
+            failing = [o for o in outcomes if o.state != signals.OK]
+            # "Read the error output" is worthless advice when nothing came back;
+            # an unobservable outcome needs a side-effect check, not a rerun.
+            mostly_unknown = bool(failing) and sum(
+                1 for o in failing if o.state == signals.UNKNOWN
+            ) > len(failing) / 2
+            guidance = (
+                "Recent calls returned nothing observable, so you do not know whether "
+                "their effects happened. Before retrying anything that writes or sends, "
+                "check the world state (read the file, list the directory, query the "
+                "record) and act on what you find."
+                if mostly_unknown
+                else (
+                    "Your recent steps have been failing more often than normal. "
+                    "Stop making the same kind of call: read the actual error output, "
+                    "form one hypothesis about the root cause, and test it with a "
+                    "different command before retrying."
+                )
+            )
             return Verdict(
                 action=VerdictAction.NUDGE,
                 reason=(
                     f"drift detected: sustained elevated failure rate "
                     f"(CUSUM statistic {s:.2f} >= threshold {self.threshold:.2f})"
                 ),
-                guidance=(
-                    "Your recent steps have been failing more often than normal. "
-                    "Stop making the same kind of call: read the actual error output, "
-                    "form one hypothesis about the root cause, and test it with a "
-                    "different command before retrying."
-                ),
+                guidance=guidance,
                 confidence=0.8,
                 detector=self.name,
             )

@@ -216,21 +216,140 @@ def test_tool_call_does_not_wake_scorer():
 
 
 def test_tool_result_wakes_scorer_only_when_drift_is_rising():
-    """One isolated failure stays below the watch fraction (silent); two
-    consecutive failures push the CUSUM to the alarm line and softly wake the
-    judge before a hard Tier 0 alarm."""
+    """One or two isolated failures stay below the soft trigger (silent); the
+    third consecutive failure lifts the CUSUM past ``drift_watch_fraction`` and
+    wakes the judge before any hard Tier 0 alarm.
+
+    The exact crossing point moved when the alarm line was calibrated to a
+    session-length false-alarm budget instead of one window; what is being
+    pinned here is the shape — silent onset, wake on a sustained run — not the
+    number three.
+    """
     engine, scorer = _engine_and_scorer("/tmp/shepherd-test-wake-drift")
 
     assert engine.process(_result("wd1", "ok")).action == VerdictAction.PASS
     assert scorer.calls == 0
-    # First failure: watch level ~0.5, below the 0.6 soft trigger.
-    assert engine.process(_result("wd1", "error: boom")).action == VerdictAction.PASS
-    assert scorer.calls == 0
-    # Second consecutive failure: watch level ~1.0, judge wakes.
-    verdict = engine.process(_result("wd1", "error: again"))
+    for text in ("error: boom", "error: again"):
+        assert engine.process(_result("wd1", text)).action == VerdictAction.PASS
+        assert scorer.calls == 0, "two consecutive failures do not spend the judge"
+
+    verdict = engine.process(_result("wd1", "error: third"))
     assert verdict.action == VerdictAction.NUDGE
     assert verdict.detector == "judge"
     assert scorer.calls == 1
+
+
+def test_low_confidence_judge_nudge_is_not_admitted():
+    """The configured admission threshold is enforced, not decorative.
+
+    Before this, a judge verdict was applied verbatim and its confidence was
+    written to the ledger and ignored, while README advertised the knob.
+    """
+    from agent_shepherd.core.types import Verdict
+
+    engine, scorer = _engine_and_scorer("/tmp/shepherd-test-admission")
+    scorer.verdict = Verdict(
+        action=VerdictAction.NUDGE,
+        reason="weak signal",
+        guidance="maybe look again",
+        confidence=0.20,
+        detector="judge",
+    )
+    gate = AgentEvent(
+        agent=Agent.CLAUDE,
+        session_id="ad1",
+        event=EventType.ITERATION_END,
+        ts=time.time(),
+        iteration=1,
+    )
+    verdict = engine.process(gate)
+    assert scorer.calls == 1, "the judge was consulted"
+    assert verdict.action == VerdictAction.PASS, "but its low-confidence nudge was not injected"
+    assert "admission" in verdict.reason
+
+
+def test_block_is_downgraded_when_the_agent_has_not_opted_in():
+    from agent_shepherd.core.types import Verdict
+
+    engine, scorer = _engine_and_scorer("/tmp/shepherd-test-block")
+    scorer.verdict = Verdict(
+        action=VerdictAction.BLOCK,
+        reason="dangerous",
+        guidance="stop that",
+        confidence=0.99,
+        detector="judge",
+    )
+    verdict = engine.process(
+        AgentEvent(
+            agent=Agent.CODEX,
+            session_id="bl1",
+            event=EventType.ITERATION_END,
+            ts=time.time(),
+            iteration=1,
+        )
+    )
+    # agents.codex.block_enabled is False by default: advice, not a stop.
+    assert verdict.action == VerdictAction.NUDGE
+    assert "block withheld" in verdict.reason
+
+
+def test_guidance_is_truncated_to_the_token_budget():
+    from agent_shepherd.core.config import PolicyConfig as _PC
+    from agent_shepherd.core.types import ToolCall, Verdict
+
+    policy = _PC(max_guidance_tokens=20)
+    cfg = ShepherdConfig(judge=JudgeConfig(), policy=policy, agents={})
+    engine = PolicyEngine(cfg, Ledger(root="/tmp/shepherd-test-budget"))
+    engine.scorer = FakeScorer(
+        Verdict(
+            action=VerdictAction.NUDGE,
+            reason="drift",
+            guidance="word " * 200,
+            confidence=0.9,
+            detector="judge",
+        )
+    )
+    verdict = engine.process(
+        AgentEvent(
+            agent=Agent.CLAUDE,
+            session_id="bg1",
+            event=EventType.ITERATION_END,
+            ts=time.time(),
+            tool=ToolCall(name="shell", input={"cmd": "true"}),
+        )
+    )
+    assert verdict.guidance is not None
+    assert len(verdict.guidance) <= 20 * 4 + len(" …[guidance truncated]")
+
+
+def test_engine_counts_its_own_cost():
+    from agent_shepherd.core.types import Verdict
+
+    engine, scorer = _engine_and_scorer("/tmp/shepherd-test-cost")
+    scorer.verdict = Verdict(
+        action=VerdictAction.NUDGE, reason="drift", guidance="fix it", confidence=0.9, detector="judge"
+    )
+    for i in range(3):
+        engine.process(
+            AgentEvent(
+                agent=Agent.CLAUDE,
+                session_id="cst",
+                event=EventType.ITERATION_END,
+                ts=time.time() + i * 600,
+                iteration=i,
+            )
+        )
+        # Adapters drain the parked verdict at the gate, which is what a real
+        # loop does; without draining, the second and third gate would replay
+        # the parked verdict instead of consulting the judge.
+        engine.take_pending_verdict(Agent.CLAUDE, "cst")
+    stats = engine.stats(Agent.CLAUDE, "cst")
+    assert stats["events_seen"] == 3
+    assert stats["judge_calls"] == 3
+    assert stats["nudges"] == 3
+    # Judge tokens are unknown to a stubbed scorer, so the ratio is reported as
+    # unknown rather than as a fabricated zero.
+    assert stats["tokens_per_intervention"] == 0.0
 
 
 def test_drift_hard_alarm_preempts_scorer():

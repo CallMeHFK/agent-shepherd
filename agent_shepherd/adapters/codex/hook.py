@@ -32,6 +32,24 @@ def _post(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
+def _flatten_result(raw: Any) -> tuple[Any, dict[str, Any]]:
+    """Split a Codex tool response into display text + structured evidence.
+
+    Same reasoning as the Claude adapter: an exit code that arrives as a field
+    is evidence, and flattening it into text before the daemon sees it forces
+    the detectors back to substring guessing.
+    """
+    extra: dict[str, Any] = {}
+    if isinstance(raw, dict):
+        for key in ("exit_code", "returncode", "is_error", "success"):
+            if key in raw:
+                extra[key] = raw[key]
+        parts = [str(raw[k]) for k in ("stdout", "stderr", "output", "content") if raw.get(k) is not None]
+        text = "\n".join(parts) if parts else json.dumps(raw, ensure_ascii=False)[:4000]
+        return text, extra
+    return raw, extra
+
+
 def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize a Codex hook payload into the canonical event shape.
 
@@ -52,6 +70,7 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         event = "notification"
 
+    result, evidence = _flatten_result(payload.get("tool_response") or payload.get("tool_output"))
     return {
         "agent": "codex",
         "session_id": str(payload.get("session_id", "unknown")),
@@ -59,10 +78,10 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
         "ts": time.time(),
         "iteration": int(payload.get("iteration", 0)),
         "tool": {"name": str(tool_name), "input": tool_input} if tool_name else None,
-        "tool_result": payload.get("tool_response") or payload.get("tool_output"),
+        "tool_result": result,
         "reasoning": payload.get("reasoning"),
         "prompt": payload.get("prompt"),
-        "metadata": {"hook_event_name": event_name, "turn_id": payload.get("turn_id")},
+        "metadata": {"hook_event_name": event_name, "turn_id": payload.get("turn_id"), **evidence},
     }
 
 

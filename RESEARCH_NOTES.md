@@ -140,6 +140,159 @@ activity observed in a 64-event lookback) for at least `min_quiet_seconds`
   and the cooldown makes even a genuine sustained condition cost one nudge per
   5 minutes instead of one per event.
 
+## Second sweep (2026-09-20/21): what changed and why
+
+A second sweep ran five query batches (~400 records, 93 kept) aimed specifically
+at what the first round left undone: measuring the supervisor, the failure signal
+it thinks it has, and the thresholds it advertises. Items 6-11 below are
+implemented; the follow-ups list is rewritten.
+
+### 6. Structured, three-state outcome classification
+
+**What changed:** new `core/rules/signals.py`. The Tier 0 failure signal was
+`any(marker in result.lower())` over a seven-word list, shared by the regression
+and drift detectors. It is now `classify(event) -> FAILED | OK | UNKNOWN`,
+decided from structured evidence first — a `PostToolUseFailure` hook event, an
+`is_error` flag, an `exit_code` field (looked for in *both* metadata and the
+response body, since the adapters lift fields into metadata) — and only then
+from line-anchored error grammars (`^error: `, `Traceback (most recent...`,
+`npm ERR!`, `N failed`, `exit code: [1-9]`). The Claude and Codex adapters stop
+flattening `tool_response` dicts into strings, which is what makes the exit code
+survive to the daemon at all.
+
+**Why:**
+- *Verified Tool Calls Improve LLM Agent Reliability Under Non-Atomic Failures* —
+  <https://arxiv.org/abs/2608.02645> — real tool calls fail non-atomically
+  (timeout after dispatch, delayed error, lost response). A binary signal has to
+  file those somewhere, and the old one filed them as *success*.
+- *Did It Happen? Counterfactual Evaluation of LLM Agent Recovery from Ambiguous
+  Tool Outcomes* — a timeout after a side-effecting call does not reveal whether
+  the action failed or executed and lost its response; retrying is right in one
+  case and duplicates the effect in the other. Hence a third state.
+- Substring matching was also live-fire wrong: `grep -rn error logs/error.log`
+  with zero hits, or a passing run that mentions `test_error_handling`, scored
+  as a failure — and because the same signal feeds the CUSUM, the false positive
+  was *integrated* into a hard alarm.
+
+**Deliberate limit:** a response that arrives and matches no failure grammar is
+`OK`, not `UNKNOWN`. Reserving UNKNOWN for "nothing observable" keeps the graded
+CUSUM from accumulating on healthy sessions; the alternative was to reintroduce
+the false-alarm failure this item exists to remove.
+
+### 7. Session-length false-alarm budget + self-starting CUSUM baseline
+
+**What changed:** the alarm threshold is now calibrated over a `drift_horizon`
+(default 120) of *re-checks* instead of one 16-step window, against a null model
+that matches the new graded signal (failure / unobservable / clean). The
+reference mean comes from the session's own pre-alarm history
+(`_baseline_for(reference)`) once ≥8 results exist, floored at `baseline/2`.
+Item 1's accepted trade-off ("the long-horizon false-alarm rate exceeds the
+per-window 5% budget") is therefore no longer accepted — it is fixed.
+
+**Why:**
+- *When Drift Detectors cry Wolf: False Alarm Rates in continuous ML Monitoring*
+  — <https://arxiv.org/abs/2607.17336> — detectors evaluated on isolated windows
+  systematically under-report production false alarms precisely because
+  monitoring is repeated. Overlapping re-checks are the multiple-testing problem.
+- *Finite-Horizon Quickest Change Detection Balancing Latency with False Alarm
+  Probability* — <https://arxiv.org/abs/2511.12803> — the delay-vs-false-alarm
+  formulation the calibration approximates.
+- *A comparative study of self-starting CUSUM control charts* —
+  <https://arxiv.org/abs/2410.12736> and *Self-Normalization for CUSUM* —
+  <https://arxiv.org/abs/2509.07112> — no Phase-I calibration phase is
+  available here, so the reference must be built online. (Follow-up 3 from the
+  first sweep, implemented.)
+
+**Measured consequence:** the stricter budget moves the soft wake from two
+consecutive failures to three, and the hard alarm from ~3 to ~4 (threshold
+1.30 → 2.35). `test_drift_detector_watch_level_tracks_consecutive_failures` now
+pins the *shape* (monotone, silent at one, crossing somewhere in the run) rather
+than the constant, because the constant is a calibrated output.
+
+**Trap found and avoided while implementing:** estimating the adaptive baseline
+from the alarming window itself is self-defeating — a pure run of failures drives
+the reference to 1.0, the required drift to `1.0 + slack`, and the statistic can
+never alarm again. The test for this is
+`test_drift_detector_baseline_comes_from_the_pre_alarm_reference_period`.
+
+### 8. Off-spec edits became a delegation contract
+
+**What changed:** `OffSpecDetector` no longer regexes paths out of the prompt and
+flags everything else (which fired on nearly every real edit, since users rarely
+name every file). A path is admissible when it is named in the goal, matched by
+`scope_allow_globs`, **or already observed this session** — a file the agent
+read or saw referenced is in play. `scope_deny_globs` is checked first and
+yields BLOCK. Edit-tool and path-key recognition now covers the real tool names
+across the three harnesses (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`,
+`notebook_path`, `filename`, …) instead of four names from one of them.
+
+**Why:**
+- *Software Delegation Contracts: Measuring Reviewability in AI Coding-Agent
+  Work* — <https://arxiv.org/abs/2606.17099> — the unit of delegated coding work
+  is task + *bounded authority* + returned package, not a keyword list.
+- *Solver-Aided Verification of Policy Compliance in Tool-Augmented LLM Agents* —
+  <https://arxiv.org/abs/2603.20449> — admissibility should be decided
+  deterministically, not by asking a model.
+- *Trust but Verify? Uncovering the Security Debt of Autonomous Coding Agents* —
+  <https://arxiv.org/abs/2607.12428> — the risk concentrates in specific
+  high-impact paths, which is what a deny-list encodes.
+
+### 9. Binding-drift detector
+
+**What changed:** new `BindingDriftDetector` (Tier 0, `binding_enabled`). An edit
+whose target path is ≥0.6 token-Jaccard similar to a path the session
+*established* (read, grepped, or merely named in a result) but is not that path
+nudges: "you inspected `config.py` and are now editing `config.prod.py`".
+
+**Why:** *Binding Drift in Multi-Step Tool-Augmented Agents* —
+<https://arxiv.org/abs/2607.18316> — agents pick the correct tool and bind it to
+the wrong entity a large fraction of the time (24–26% reported for single-step
+actions), and the call *succeeds*, so no outcome-based signal sees it. Neither
+the loop detector (arguments genuinely differ) nor the contract check (the path
+may be in scope) covers it.
+
+### 10. The advertised thresholds now exist, and are calibrated
+
+**What changed:** `nudge_threshold`, `block_threshold` and `max_guidance_tokens`
+were declared in config, documented in README as tuning knobs, and read by
+nothing — a judge verdict was applied verbatim and its confidence only recorded.
+`PolicyEngine._control` gates admission on them; BLOCK additionally requires the
+per-agent `block_enabled` opt-in and otherwise degrades to a NUDGE; guidance is
+truncated to the token budget. New `core/judge/risk.py` fits those cut-points by
+split conformal risk control (monotone FPR in the threshold, `(n+1)/n`
+finite-sample correction, configured priors used until `risk_min_samples`
+labeled outcomes exist), persisted to `$SHEPHERD_HOME/risk.json`, fed by
+`PolicyEngine.note_outcome` from observed adherence.
+
+**Why:**
+- *Calibration Is Not Control: Why LLM-Agent Oversight Needs Intervention* —
+  <https://arxiv.org/abs/2606.21399> — framing oversight as "estimate a risk
+  score, cross a threshold" controls the wrong object; the quantity of interest
+  is the effect of intervening. This is the closest paper in the sweep to the
+  project's own premise and the reason the fix is *calibrate then gate* rather
+  than *hand-pick a number and pretend it is a guarantee*.
+- *On Verbalized Confidence Scores for LLMs* —
+  <https://arxiv.org/abs/2412.14737> — the number being thresholded is a
+  verbalized self-report, so it earns a calibration step, not blind trust.
+- *Conformal Selective Prediction with General Risk Control* —
+  <https://arxiv.org/abs/2603.24704> and *Selective Conformal Risk Control* —
+  <https://arxiv.org/abs/2512.12844> — the fitting procedure.
+
+### 11. Cost accounting, so "worth it" is answerable
+
+**What changed:** `SessionState` counts events seen, judge calls, judge tokens
+(from the OpenAI-compatible `usage` block), nudges, blocks, escalations and
+suppressions; every verdict is written to the ledger with that context, and
+`PolicyEngine.stats` / `GET /stats/<agent>/<session>` / `shepherd stats` expose
+it, including `tokens_per_intervention` — the ratio that decides whether the
+reviewer's cost is dominated by supervision or by the agent.
+
+**Why:** the saturation-trap papers argue the supervisor's cost ends up
+dominating; that is an argument about a number nobody in this repo could
+formerly print. *EcoAgent-Bench* — <https://arxiv.org/abs/2608.05519> — makes the
+same methodological point for agents generally: resource use is part of the task,
+not an auxiliary statistic.
+
 ## Honest caveats (negative results we did NOT ignore)
 
 - *Sample More, Reflect Less* — <https://arxiv.org/abs/2607.28576> — at equal
@@ -156,30 +309,34 @@ activity observed in a 64-event lookback) for at least `min_quiet_seconds`
 
 ## Follow-ups considered, not implemented
 
-1. **Shepherd rulebook** — *Meta-Policy Reflexion*
-   (<https://arxiv.org/abs/2509.03990>): persist the recurring nudge texts
-   that actually work (per-agent "reflective memory") plus hard admissibility
-   checks, so repeated failures become rules the agent sees up front. The
-   ledger already records everything needed; this is an analysis + injection
-   layer on top.
+1. **Shepherd rulebook injection into the live loop** — *Meta-Policy Reflexion*
+   (<https://arxiv.org/abs/2509.03990>): the adherence analysis and the rendered
+   "house rules" header exist (`core/rules/rulebook.py`), but the engine does not
+   yet inject that header at `PROMPT_SUBMIT`. The ledger already records
+   everything needed; this is wiring, not research.
 2. **Graph-based credit assignment** — GDCR (2605.29697): replace the
    "name the origin step" heuristic with a causal graph over steps for the
    judge's verdict. Higher precision, much more machinery.
-3. **Self-normalized CUSUM** — <https://arxiv.org/abs/2509.07112>: the
-   current baseline/slack are fixed; a self-normalized version would adapt to
-   per-session failure baselines (agents vary a lot in how flaky their
-   environment is).
-4. **Multi-view progress scoring** — *ProgRouter*
+3. **Multi-view progress scoring** — *ProgRouter*
    (<https://arxiv.org/abs/2608.25992>): the scalar CUSUM is one view of
-   "progress"; *SiLR* (<https://arxiv.org/abs/2609.04629>) warns that no
-   single scalar surrogate is sound for multi-dimensional violation state.
-   A 2–3 view statistic (failure rate + novelty of outputs + goal coverage)
-   would be the principled next step.
-5. **Tool-call-rate steering** — <https://arxiv.org/abs/2608.25198>: the
-   nudge/block levers are the steering knobs; their effect on call frequency
-   is currently unmeasured and would be a natural experiment.
-6. **Context assembly** — *ContextPipe*
-   (<https://arxiv.org/abs/2609.00749>): the judge window is a fixed last-20
-   slice; treating window selection as a retrieval/assembly problem (include
-   the goal, the last failure, the last verification) is likely to beat the
-   fixed slice on long sessions.
+   "progress"; *SiLR* (<https://arxiv.org/abs/2609.04629>) warns that no single
+   scalar surrogate is sound for multi-dimensional violation state. A 2–3 view
+   statistic (failure rate + novelty of outputs + goal coverage) would be the
+   principled next step. The self-normalized CUSUM item from the first sweep is
+   done (item 7); this one is not.
+4. **Tool-call-rate steering** — <https://arxiv.org/abs/2608.25198>: the
+   nudge/block levers are the steering knobs; item 11 makes their cost
+   measurable, but their *effect* on call frequency is still unmeasured.
+   `trajectory-judge` (2609.00038) is the template for that experiment.
+5. **Context assembly for the judge window** — *ContextPipe*
+   (<https://arxiv.org/abs/2609.00749>) and *Tessera*: the judge window is still
+   a fixed last-20 slice; treating window selection as an assembly problem
+   (goal + last failure + last verification) should beat it on long sessions.
+6. **Per-agent baselines from the eval corpus**: the risk model is fitted per
+   (agent, source), but `shepherd eval` currently reports aggregate numbers; the
+   per-agent/per-model breakdown that would let a user *see* the difference is
+   not surfaced.
+7. **Ambiguity-aware guidance for `UNKNOWN` outcomes**: item 6 introduced a
+   third state, but the guidance text still tells the agent to "read the error
+   output" — which is useless when nothing came back. A retry-vs-verify-side-
+   effect branch (Did It Happen?) belongs in the prompt, not in the detector.

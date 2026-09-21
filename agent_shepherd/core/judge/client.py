@@ -28,6 +28,14 @@ class JudgeClient:
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+        # Token usage of the most recent call. The supervisor's own cost is the
+        # number that decides whether it is worth running, so it is recorded in
+        # the ledger rather than left as a guess (the reviewer's cost is what the
+        # saturation-trap literature is really about).
+        self.last_usage: dict[str, int] = {}
+
+    def usage_totals(self) -> dict[str, int]:
+        return dict(self.last_usage)
 
     def complete(self, messages: list[dict[str, str]], max_tokens: int = 512, temperature: float = 0.0) -> str:
         """Call the judge model and return its raw text response."""
@@ -51,6 +59,10 @@ class JudgeClient:
         except httpx.HTTPStatusError as exc:
             raise RuntimeError(f"judge request failed ({resp.status_code}): {resp.text[:300]}") from exc
         data = resp.json()
+        usage = data.get("usage") if isinstance(data, dict) else None
+        self.last_usage = {
+            str(k): int(v) for k, v in usage.items() if isinstance(v, (int, float))
+        } if isinstance(usage, dict) else {}
         try:
             return str(data["choices"][0]["message"]["content"])
         except (KeyError, IndexError, TypeError) as exc:

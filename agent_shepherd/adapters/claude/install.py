@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from ...core.config import ShepherdConfig
+from ..backup import load_json_or_raise, write_json
 
 
 def install_claude(cfg: ShepherdConfig, dry_run: bool = False) -> None:
@@ -23,12 +23,7 @@ def install_claude(cfg: ShepherdConfig, dry_run: bool = False) -> None:
         print(f"dry-run: would append hooks to {settings_path}")
         return
 
-    existing = {}
-    if settings_path.exists():
-        try:
-            existing = json.loads(settings_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            existing = {}
+    existing = load_json_or_raise(settings_path)
 
     hooks = existing.setdefault("hooks", {})
     for event in events:
@@ -37,5 +32,7 @@ def install_claude(cfg: ShepherdConfig, dry_run: bool = False) -> None:
         if entry not in hooks[event]:
             hooks[event].append(entry)
 
-    settings_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    saved = write_json(settings_path, existing)
     print(f"installed Claude Code supervisor hooks -> {settings_path}")
+    if saved:
+        print(f"previous settings preserved at {saved}")

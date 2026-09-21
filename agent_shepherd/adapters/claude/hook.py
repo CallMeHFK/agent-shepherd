@@ -33,6 +33,26 @@ def _post(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
+def _flatten_result(raw: Any) -> tuple[Any, dict[str, Any]]:
+    """Split a Claude Code tool response into display text + structured evidence.
+
+    Claude Code hands PostToolUse a ``tool_response`` that is often a *dict*
+    (Bash gives ``{stdout, stderr, exit_code, interrupted}``). Keeping the exit
+    code and the error flag as structured metadata is what lets the daemon tell
+    a real failure from output that merely contains the word "error" — flattening
+    everything into a string here would throw that evidence away.
+    """
+    extra: dict[str, Any] = {}
+    if isinstance(raw, dict):
+        for key in ("exit_code", "returncode", "is_error", "interrupted", "success"):
+            if key in raw:
+                extra[key] = raw[key]
+        parts = [str(raw[k]) for k in ("stdout", "stderr", "content", "output") if raw.get(k) is not None]
+        text = "\n".join(parts) if parts else json.dumps(raw, ensure_ascii=False)[:4000]
+        return text, extra
+    return raw, extra
+
+
 def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize a Claude Code hook payload into the canonical event shape.
 
@@ -52,6 +72,11 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
     elif event_name == "UserPromptSubmit":
         event = "prompt_submit"
 
+    result, evidence = _flatten_result(payload.get("tool_response") or payload.get("tool_output"))
+    metadata: dict[str, Any] = {"hook_event_name": event_name, **evidence}
+    if event_name == "PostToolUseFailure":
+        metadata["is_error"] = True
+
     normalized: dict[str, Any] = {
         "agent": "claude",
         "session_id": str(payload.get("session_id", "unknown")),
@@ -59,10 +84,10 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
         "ts": time.time(),
         "iteration": int(payload.get("iteration", 0)),
         "tool": {"name": str(tool_name), "input": tool_input} if tool_name else None,
-        "tool_result": payload.get("tool_response") or payload.get("tool_output"),
+        "tool_result": result,
         "reasoning": payload.get("reasoning"),
         "prompt": payload.get("prompt"),
-        "metadata": {"hook_event_name": event_name},
+        "metadata": metadata,
     }
     return normalized
 

@@ -24,3 +24,6 @@ htmlcov/
 
 # OS
 .DS_Store
+
+# Qoder agent worktrees (tool state, never part of the project)
+.qoder/

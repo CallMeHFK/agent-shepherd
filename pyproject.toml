@@ -23,6 +23,13 @@ shepherd-hook = "agent_shepherd.adapters.hook:main"
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio", "ruff"]
 
+# Also declared as a uv dependency *group* so a plain `uv sync` installs the
+# test stack. Without this, `uv run pytest` can silently resolve a pytest from
+# outside the project environment that imports a stale installed copy of this
+# package, and report green tests against code that is no longer on disk.
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio", "ruff"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["agent_shepherd"]
 force-include = { "agent_shepherd/adapters/qwenpaw/plugin.json" = "agent_shepherd/adapters/qwenpaw/plugin.json" }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -32,6 +33,25 @@ def _parser() -> argparse.ArgumentParser:
     replay = sub.add_parser("replay", help="replay the audit ledger for a session")
     replay.add_argument("agent", choices=["qwenpaw", "claude", "codex"])
     replay.add_argument("session_id")
+
+    stats = sub.add_parser("stats", help="summarize what the supervisor did in one session")
+    stats.add_argument("agent", choices=["qwenpaw", "claude", "codex"])
+    stats.add_argument("session_id")
+
+    ev = sub.add_parser(
+        "eval",
+        help="run the offline counterfactual benchmark (fault injection with known onsets)",
+    )
+    ev.add_argument("--seed", type=int, default=7)
+    ev.add_argument("--sessions", type=int, default=8, help="sessions per fault kind")
+    ev.add_argument("--steps", type=int, default=60, help="events per session")
+    ev.add_argument("--json", dest="json_out", help="write the full report to this path")
+    ev.add_argument(
+        "--fail-under-f1",
+        type=float,
+        dest="fail_under_f1",
+        help="exit non-zero if aggregate F1 is below this (CI gate)",
+    )
     return p
 
 
@@ -58,19 +78,74 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "install":
         print(f"installing {args.agent} adapter (dry-run={args.dry_run})")
-        if args.agent == "qwenpaw":
-            from .adapters.qwenpaw.install import install_qwenpaw
+        from .adapters.backup import UnparseableConfig
 
-            install_qwenpaw(cfg, dry_run=args.dry_run)
-        elif args.agent == "claude":
-            from .adapters.claude.install import install_claude
+        try:
+            if args.agent == "qwenpaw":
+                from .adapters.qwenpaw.install import install_qwenpaw
 
-            install_claude(cfg, dry_run=args.dry_run)
-        elif args.agent == "codex":
-            from .adapters.codex.install import install_codex
+                install_qwenpaw(cfg, dry_run=args.dry_run)
+            elif args.agent == "claude":
+                from .adapters.claude.install import install_claude
 
-            install_codex(cfg, dry_run=args.dry_run)
+                install_claude(cfg, dry_run=args.dry_run)
+            elif args.agent == "codex":
+                from .adapters.codex.install import install_codex
+
+                install_codex(cfg, dry_run=args.dry_run)
+        except UnparseableConfig as exc:
+            print(
+                f"refusing to write: {exc}\n"
+                "the existing config does not parse, and overwriting it would destroy "
+                "hand-edited settings. Fix the file (or delete it) and re-run.",
+                file=sys.stderr,
+            )
+            return 2
         return 0
+
+    if args.command == "stats":
+        ledger = Ledger()
+        agent = _agent(args.agent)
+        records = ledger.iter_records(agent, args.session_id)
+        verdicts = [r for r in records if r.get("type") == "verdict"]
+        nudges = [r for r in verdicts if r.get("action") == "nudge"]
+        by_detector: dict[str, int] = {}
+        for r in nudges:
+            by_detector[str(r.get("detector"))] = by_detector.get(str(r.get("detector")), 0) + 1
+        last_cost = next((r.get("context") for r in reversed(verdicts) if r.get("context")), {})
+        print(
+            json.dumps(
+                {
+                    "agent": args.agent,
+                    "session_id": args.session_id,
+                    "records": len(records),
+                    "verdicts": len(verdicts),
+                    "nudges": len(nudges),
+                    "nudges_by_detector": by_detector,
+                    "suppressed": sum(1 for r in verdicts if "suppressed" in str(r.get("reason"))),
+                    "cost": last_cost,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "eval":
+        from .eval.harness import main as eval_main
+
+        return eval_main(
+            [
+                "--seed",
+                str(args.seed),
+                "--sessions",
+                str(args.sessions),
+                "--steps",
+                str(args.steps),
+                *(["--json", args.json_out] if args.json_out else []),
+                *(["--fail-under-f1", str(args.fail_under_f1)] if args.fail_under_f1 else []),
+            ]
+        )
 
     if args.command == "tail":
         ledger = Ledger()

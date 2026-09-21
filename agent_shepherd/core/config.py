@@ -66,6 +66,13 @@ class PolicyConfig:
     "state-saturation trap": a fixed threshold on cumulative state fires on a
     large constant fraction of actions, so the judge's cost ends up exceeding
     the agent's.
+
+    ``nudge_threshold`` / ``block_threshold`` / ``max_guidance_tokens`` are
+    enforced by the engine. The two score thresholds are *priors*: once enough
+    labeled outcomes accumulate they are replaced by conformal-risk-control
+    calibrated values (see :mod:`agent_shepherd.core.judge.risk`), because a
+    hand-picked cut on a verbalized confidence is not a control (arXiv
+    2606.21399, 2412.14737).
     """
 
     nudge_threshold: float = 0.60
@@ -78,18 +85,47 @@ class PolicyConfig:
     # suppressed.
     nudge_cooldown_seconds: float = 300.0
     # CUSUM drift detector (Tier 0). Its alarm threshold is calibrated by
-    # Monte-Carlo simulation so the per-window false-alarm rate stays at or
-    # below ``drift_target_fpr``.
+    # Monte-Carlo simulation so the false-alarm rate over ``drift_horizon``
+    # *re-checks* stays at or below ``drift_target_fpr`` — an overlapping-window
+    # budget, which is what the agent actually experiences (arXiv 2607.17336).
     drift_enabled: bool = True
     drift_target_fpr: float = 0.05
+    drift_horizon: int = 120
+    # Adopt the session's own pre-alarm failure rate as the CUSUM reference once
+    # enough results have been seen (self-starting control chart).
+    drift_adaptive_baseline: bool = True
     # Soft trigger: when the CUSUM statistic reaches this fraction of its
     # alarm line on a tool result, wake the LLM judge early. 1.0 disables the
     # soft trigger (the judge wakes only at checkpoints).
     drift_watch_fraction: float = 0.6
+    # Binding drift: acting on a near-miss sibling of the entity that was
+    # resolved (arXiv 2607.18316). ``binding_similarity`` is the token-Jaccard
+    # above which two paths are considered confusable.
+    binding_enabled: bool = True
+    binding_similarity: float = 0.6
+    # Delegation contract for the off-spec detector: an edit is admissible when
+    # the path is named in the goal, matched by an allow-glob, or already
+    # observed this session. Deny-globs are checked first and BLOCK.
+    scope_allow_globs: list[str] = field(default_factory=list)
+    scope_deny_globs: list[str] = field(default_factory=list)
+    # Conformal risk control: the per-source false-intervention budget the
+    # calibrated thresholds are fitted to, and the evidence needed before a
+    # fitted value is trusted over the configured prior.
+    risk_target_fpr: float = 0.05
+    risk_min_samples: int = 20
+    # Promote repeatedly-followed guidance into a header the agent sees up
+    # front instead of re-nagging it mid-run (arXiv 2509.03990).
+    rulebook_enabled: bool = True
+    rulebook_budget_tokens: int = 160
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> PolicyConfig:
         data = data or {}
+
+        def _globs(key: str) -> list[str]:
+            raw = data.get(key) or []
+            return [str(item) for item in raw] if isinstance(raw, (list, tuple)) else []
+
         return cls(
             nudge_threshold=float(data.get("nudge_threshold", 0.60)),
             block_threshold=float(data.get("block_threshold", 0.85)),
@@ -98,7 +134,17 @@ class PolicyConfig:
             nudge_cooldown_seconds=float(data.get("nudge_cooldown_seconds", 300.0)),
             drift_enabled=bool(data.get("drift_enabled", True)),
             drift_target_fpr=float(data.get("drift_target_fpr", 0.05)),
+            drift_horizon=int(data.get("drift_horizon", 120)),
+            drift_adaptive_baseline=bool(data.get("drift_adaptive_baseline", True)),
             drift_watch_fraction=float(data.get("drift_watch_fraction", 0.6)),
+            binding_enabled=bool(data.get("binding_enabled", True)),
+            binding_similarity=float(data.get("binding_similarity", 0.6)),
+            scope_allow_globs=_globs("scope_allow_globs"),
+            scope_deny_globs=_globs("scope_deny_globs"),
+            risk_target_fpr=float(data.get("risk_target_fpr", 0.05)),
+            risk_min_samples=int(data.get("risk_min_samples", 20)),
+            rulebook_enabled=bool(data.get("rulebook_enabled", True)),
+            rulebook_budget_tokens=int(data.get("rulebook_budget_tokens", 160)),
         )
 
 
@@ -175,7 +221,17 @@ class ShepherdConfig:
                 "nudge_cooldown_seconds": 300,
                 "drift_enabled": True,
                 "drift_target_fpr": 0.05,
+                "drift_horizon": 120,
+                "drift_adaptive_baseline": True,
                 "drift_watch_fraction": 0.6,
+                "binding_enabled": True,
+                "binding_similarity": 0.6,
+                "scope_allow_globs": [],
+                "scope_deny_globs": ["*.env", "*.pem", ".git/*", "*.secret*"],
+                "risk_target_fpr": 0.05,
+                "risk_min_samples": 20,
+                "rulebook_enabled": True,
+                "rulebook_budget_tokens": 160,
             },
             "agents": {
                 "qwenpaw": {"enabled": True, "block_enabled": False},

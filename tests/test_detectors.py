@@ -64,16 +64,73 @@ def test_regression_detector_fires_when_test_fails_after_passing():
     detector = RegressionDetector()
     history = [
         ev(event=EventType.TOOL_CALL, tool=ToolCall(name="pytest"), iteration=1),
-        ev(event=EventType.TOOL_RESULT, tool=ToolCall(name="pytest"), result="passed", iteration=2),
+        ev(
+            event=EventType.TOOL_RESULT,
+            tool=ToolCall(name="pytest"),
+            result="42 passed in 0.87s",
+            iteration=2,
+        ),
         ev(event=EventType.TOOL_CALL, tool=ToolCall(name="pytest"), iteration=3),
     ]
     verdict = detector.evaluate(
-        ev(event=EventType.TOOL_RESULT, tool=ToolCall(name="pytest"), result="failed", iteration=4),
+        ev(
+            event=EventType.TOOL_RESULT,
+            tool=ToolCall(name="pytest"),
+            result="===== FAILURES =====\nFAILED tests/test_x.py::test_y - assert 0",
+            iteration=4,
+        ),
         history,
     )
     assert verdict is not None
     assert verdict.action == VerdictAction.NUDGE
     assert "regression" in verdict.reason
+
+
+def test_regression_detector_needs_real_evidence_in_both_directions():
+    """The old substring signal called ``grep error logs/error.log`` a failure.
+
+    Fixture text below is genuine tool output: a passing run, then a run whose
+    only "error" mention is a filename.
+    """
+    detector = RegressionDetector()
+    history = [
+        ev(
+            event=EventType.TOOL_RESULT,
+            tool=ToolCall(name="pytest"),
+            result="42 passed in 0.87s",
+            iteration=1,
+        ),
+    ]
+    quiet = ev(
+        event=EventType.TOOL_RESULT,
+        tool=ToolCall(name="pytest"),
+        result="tests/test_error_handling.py:12: note: uses the word error liberally",
+        iteration=2,
+    )
+    assert detector.evaluate(quiet, history) is None
+
+
+def test_regression_detector_reads_structured_exit_code():
+    """An exit code stated as a field outranks whatever the text says."""
+    detector = RegressionDetector()
+    history = [
+        ev(
+            event=EventType.TOOL_RESULT,
+            tool=ToolCall(name="pytest"),
+            result="42 passed in 0.87s",
+            iteration=1,
+        ),
+    ]
+    current = AgentEvent(
+        agent=Agent.QWENPAW,
+        session_id="s1",
+        event=EventType.TOOL_RESULT,
+        ts=time.time(),
+        tool=ToolCall(name="pytest"),
+        tool_result="no failure grammar in this text at all",
+        metadata={"exit_code": 1},
+    )
+    assert detector.evaluate(current, history) is not None
 
 
 def test_offspec_detector_fires_on_unrelated_edits():
@@ -172,12 +229,38 @@ def test_drift_detector_fires_on_sustained_failures():
 
 
 def test_drift_detector_watch_level_tracks_consecutive_failures():
-    """The soft trigger: one isolated failure stays below the watch fraction
-    (default 0.6); two consecutive push the statistic to the alarm line."""
+    """The soft trigger is onset-shaped, not state-shaped.
+
+    The alarm line used to be calibrated for a single 16-step window, which made
+    two consecutive failures enough to wake the judge. Calibrating over a
+    120-step session (the budget the agent actually experiences, per
+    arXiv 2607.17336) raises the line, so it now takes three consecutive
+    failures to reach the watch fraction and four to hard-alarm. The property
+    that matters is unchanged: an isolated failure is silent, and the statistic
+    climbs monotonically with a sustained run.
+    """
     detector = CUSUMDriftDetector()
     bad = ev(event=EventType.TOOL_RESULT, tool=ToolCall(name="shell"), result="error: x")
-    one = detector.watch_level(bad, [])
-    two = detector.watch_level(bad, [bad])
-    assert 0 < one < 0.6 <= two
-    # The calibrated threshold keeps false alarms within the 5% budget.
-    assert detector.threshold > 0.1
+    levels = [detector.watch_level(bad, [bad] * n) for n in range(5)]
+    assert levels == sorted(levels), "monotone in the length of the failing run"
+    assert 0 < levels[0] < 0.6, "one failure stays below the watch fraction"
+    assert levels[1] < 0.6 <= levels[2], "the third consecutive failure crosses it"
+    assert levels[3] >= 1.0, "the fourth reaches the hard alarm"
+    # The calibrated threshold keeps false alarms within the 5% session budget.
+    assert detector.threshold > 1.0
+
+
+def test_drift_detector_baseline_comes_from_the_pre_alarm_reference_period():
+    """Self-normalization trap: if the reference mean is taken from the window
+    that is alarming, a run of failures pushes the baseline to 1.0 and the
+    detector can never alarm again."""
+    detector = CUSUMDriftDetector()
+    healthy = [
+        ev(event=EventType.TOOL_RESULT, tool=ToolCall(name="shell"), result="done", iteration=i)
+        for i in range(10)
+    ]
+    failing = [
+        ev(event=EventType.TOOL_RESULT, tool=ToolCall(name="shell"), result="error: boom", iteration=i)
+        for i in range(10, 20)
+    ]
+    assert detector.evaluate(failing[-1], healthy + failing[:-1]) is not None

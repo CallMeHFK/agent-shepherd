@@ -6,10 +6,14 @@ A supervisor plugin that observes AI agents (**QwenPaw**, **Claude Code**, **Cod
 
 The supervisor is a two-tier policy engine:
 
-1. **Tier 0 — deterministic detectors** (zero cost, always on): loop detection (exact and near-duplicate calls), regression detection, off-spec edits, context rot (requires a sustained wall-clock quiet stretch, so quick streaming output never trips it), and sustained **drift** — a CUSUM alarm over a cheap failure signal whose threshold is calibrated by Monte-Carlo simulation to a 5% per-window false-alarm budget. Repeat NUDGEs from the same detector within a session are suppressed until `nudge_cooldown_seconds` has elapsed (hysteresis), so a detected condition does not nag the agent on every subsequent event.
+1. **Tier 0 — deterministic detectors** (zero cost, always on): loop detection (exact and near-duplicate calls), regression detection, off-spec edits judged against the session's *delegation contract*, **binding drift** (acting on a near-miss sibling of the file you actually resolved), context rot (requires a sustained wall-clock quiet stretch, so quick streaming output never trips it), and sustained **drift** — a CUSUM alarm whose threshold is calibrated by Monte-Carlo simulation to a **session-length** false-alarm budget, with a self-starting per-session baseline. Tool outcomes are classified three ways — *failed / ok / unknown* — from structured evidence (exit codes, failure hooks) before falling back to anchored error grammars, so `grep error logs/error.log` is not a failure and a lost response is not a success. Repeat NUDGEs from the same detector within a session are suppressed until `nudge_cooldown_seconds` has elapsed (hysteresis), so a detected condition does not nag the agent on every subsequent event.
 2. **Tier 1 — LLM step scorer** (PRM-style, sliding window): scores each recent step on on-goal / justified / verified, names the step where the trajectory drifted, and returns actionable guidance. The judge wakes at natural checkpoints (prompt start, iteration end, session stop) and — mid-iteration — only when the CUSUM statistic climbs toward its alarm line, so the expensive reviewer stays asleep while the agent is healthy.
 
+A judge's self-reported confidence is *not* taken at face value: `nudge_threshold` / `block_threshold` gate admission (and are re-fitted from observed outcomes by conformal risk control), `block` is only ever emitted for an agent that opted in, and guidance is truncated to `max_guidance_tokens`. Every session's own cost — events seen, judge calls, judge tokens, nudges, suppressions — is counted and readable with `shepherd stats`.
+
 The design decisions above, and the papers that motivate them, are recorded in [RESEARCH_NOTES.md](RESEARCH_NOTES.md).
+
+**Does it work?** `shepherd eval` runs an offline counterfactual benchmark: scripted healthy sessions plus a fault injector that breaks exactly one thing at a known step, scored for per-detector precision/recall, detection delay in steps, false-alarm rate, and supervision cost. It is deterministic, offline, and runs in CI.
 
 The judge model backend is pluggable: **Agnes** (`agnes-3.0-flash` via the Agnes AI Hub, OpenAI-compatible) is the default, and any OpenAI-compatible endpoint (local **vLLM**, cc-switch, etc.) works by setting `SHEPHERD_JUDGE_BASE_URL` / `SHEPHERD_JUDGE_MODEL`.
 
@@ -30,14 +34,21 @@ judge:
   api_key: ${SHEPHERD_JUDGE_API_KEY}
   timeout: 30
 policy:
-  nudge_threshold: 0.6
+  nudge_threshold: 0.6      # admission prior; replaced by CRC once outcomes accumulate
   block_threshold: 0.85
   max_guidance_tokens: 500
   fail_open: true
   nudge_cooldown_seconds: 300
   drift_enabled: true
-  drift_target_fpr: 0.05
+  drift_target_fpr: 0.05    # budget over drift_horizon re-checks, not one window
+  drift_horizon: 120
+  drift_adaptive_baseline: true
   drift_watch_fraction: 0.6
+  binding_enabled: true
+  scope_allow_globs: []
+  scope_deny_globs: ["*.env", "*.pem", ".git/*"]
+  risk_target_fpr: 0.05
+  rulebook_enabled: true
 agents:
   qwenpaw: {enabled: true, block_enabled: false}
   claude: {enabled: true, block_enabled: false}
@@ -100,7 +111,25 @@ Every observation and verdict is appended to `~/.shepherd/sessions/<agent>/<sess
 ```bash
 shepherd replay qwenpaw <session-id>
 shepherd tail qwenpaw <session-id>
+shepherd stats claude <session-id>   # what it did, and what it cost
 ```
+
+Installing an adapter never destroys your configuration: the previous
+`settings.json` / `hooks.json` is copied to a timestamped `.bak` first, an
+unparseable existing file is refused rather than overwritten, and a previous
+QwenPaw plugin bundle is moved aside as `agent-shepherd.prev-<stamp>` instead of
+being deleted.
+
+## Measuring it
+
+```bash
+shepherd eval --seed 7 --sessions 8 --steps 60 --fail-under-f1 0.6
+```
+
+Injects known faults into scripted sessions and reports per-fault recall,
+detection delay in steps, and the false-alarm rate on clean sessions. The
+benchmark is the answer to "is the supervisor worth its own cost?" — run it
+before and after changing any threshold.
 
 ## Tests
 
@@ -115,8 +144,13 @@ development setup, adapter/detector conventions, commit and PR guidelines, and t
 strict no-real-secrets rule. Quick start:
 
 ```bash
-uv sync --all-extras && uv run pytest -q && uv run ruff check .
+uv sync --all-extras && uv run python -m pytest -q && uv run ruff check .
 ```
+
+Use `python -m pytest` (not a bare `pytest`): if the dev extras are not
+installed, a bare `pytest` can resolve from outside this project's environment
+and import a *stale installed copy* of the package — reporting green tests
+against code that is no longer on disk.
 
 Interactions in this project are governed by our
 [Code of Conduct](CODE_OF_CONDUCT.md).

@@ -15,10 +15,10 @@ or ``Notification``.)
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from ...core.config import ShepherdConfig
+from ..backup import load_json_or_raise, write_json
 
 # Events this adapter subscribes to. ``matcher`` is honored for tool events but
 # ignored for Stop/UserPromptSubmit, so it is omitted there.
@@ -38,12 +38,7 @@ def install_codex(cfg: ShepherdConfig, dry_run: bool = False) -> None:
         print(f"dry-run: would write hooks to {hooks_path}")
         return
 
-    existing: dict = {}
-    if hooks_path.exists():
-        try:
-            existing = json.loads(hooks_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            existing = {}
+    existing: dict = load_json_or_raise(hooks_path)
 
     # Remove any legacy top-level event keys (old broken format) so the file
     # parses under the current schema.
@@ -64,8 +59,10 @@ def install_codex(cfg: ShepherdConfig, dry_run: bool = False) -> None:
         if group not in bucket:
             bucket.append(group)
 
-    hooks_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    saved = write_json(hooks_path, existing)
     print(f"installed Codex supervisor hooks -> {hooks_path}")
+    if saved:
+        print(f"previous hooks file preserved at {saved}")
     print(
         "note: Codex runs hooks only after they are *trusted*. Approve the hooks once\n"
         "      in the interactive Codex TUI, or pass --dangerously-bypass-hook-trust\n"

@@ -32,3 +32,8 @@ class StepScorer:
         ]
         text = self.client.complete(messages, max_tokens=512, temperature=0.0)
         return self.client.parse_verdict(text)
+
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Token cost of the most recent ``score`` call."""
+        return dict(getattr(self.client, "last_usage", {}) or {})
