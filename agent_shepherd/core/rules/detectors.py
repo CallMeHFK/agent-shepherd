@@ -478,7 +478,7 @@ class CUSUMDriftDetector(Detector):
         seed: int = 1234,
         n_sim: int = 20000,
         horizon: int = 120,
-        unknown_weight: float = 0.5,
+        unknown_weight: float = 0.75,
         adaptive_baseline: bool = True,
         min_baseline_samples: int = 8,
     ):
@@ -541,15 +541,26 @@ class CUSUMDriftDetector(Detector):
         return 0.0
 
     def _statistic(self, event: AgentEvent, history: list[AgentEvent]) -> float:
-        """Recompute the one-sided CUSUM sum over the window ending at ``event``."""
+        """Recompute the one-sided CUSUM sum over the *results* in the window.
+
+        Only tool results carry signal, so only they may be summed. Folding the
+        interleaved calls and reasoning chunks too — each contributing ``0.0 -
+        slack`` — makes a session that never gets a response back undetectable:
+        the decay from the calls outruns the +0.5 credit from the empty results
+        and the statistic can never reach its alarm line. That is exactly the
+        non-atomic-failure case this signal was widened to cover.
+        """
         window = history[-self.window :]
         reference = history[: -self.window] if len(history) > self.window else []
         base = self._baseline_for(reference)
         slack = self.slack + base
         s = 0.0
         for e in window:
+            if e.event != EventType.TOOL_RESULT:
+                continue
             s = max(0.0, s + (self._signal(e) - slack))
-        s = max(0.0, s + (self._signal(event) - slack))
+        if event.event == EventType.TOOL_RESULT:
+            s = max(0.0, s + (self._signal(event) - slack))
         return s
 
     def _calibrate(

@@ -36,6 +36,9 @@ MAX_DELAY = {
     "context_rot": 10,
     "sustained_drift": 16,
     "binding_drift": 2,
+    # An unobservable outcome is credited at 0.75 rather than 1.0, so the alarm
+    # needs more of them: slower than a hard failure, and deliberately so.
+    "ambiguous_tool_loss": 18,
 }
 CLEAN_KINDS = ("none", "flaky_but_healthy")
 
@@ -104,17 +107,22 @@ def test_clean_corpus_carries_no_failure_evidence():
     assert rising > 0.0
 
 
-def test_lost_responses_never_reach_the_alarm_line(caps):
-    """The ambiguous corpus has to be ambiguous *in this build*, not by our
-    saying so: the drift detector alone must never alarm on a run of lost
-    responses, while it does alarm on the same pacing of real failures."""
+def test_lost_responses_reach_the_alarm_line(caps):
+    """A run of *lost* responses must be alarmable, not just labelled ambiguous.
+
+    The statistic originally folded over every event, so the decay contributed by
+    interleaved calls outran the credit from empty results and this failure mode
+    was structurally invisible; it now folds over results only and weights an
+    unobservable outcome at 0.75, so the alarm is reachable. The capability probe
+    and the actual behaviour must still agree, which is what the last assert is
+    for — a probe that lies is worse than no probe."""
 
     def drift_fires(kind: str) -> bool:
         detector = CUSUMDriftDetector(target_fpr=0.05)
         session = scenarios.build_session(kind, steps=50, seed=7)
         return any(detector.evaluate(e, session.events[:i]) is not None for i, e in enumerate(session.events))
 
-    assert not drift_fires("ambiguous_tool_loss")
+    assert drift_fires("ambiguous_tool_loss")
     assert drift_fires("sustained_drift")
     assert ("unobservable_alarm" in caps) is drift_fires("ambiguous_tool_loss")
 

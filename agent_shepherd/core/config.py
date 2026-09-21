@@ -94,10 +94,19 @@ class PolicyConfig:
     # Adopt the session's own pre-alarm failure rate as the CUSUM reference once
     # enough results have been seen (self-starting control chart).
     drift_adaptive_baseline: bool = True
+    # How much an unobservable outcome (empty / lost response) counts toward the
+    # drift statistic, relative to a definite failure at 1.0.
+    drift_unknown_weight: float = 0.75
     # Soft trigger: when the CUSUM statistic reaches this fraction of its
     # alarm line on a tool result, wake the LLM judge early. 1.0 disables the
     # soft trigger (the judge wakes only at checkpoints).
     drift_watch_fraction: float = 0.6
+    # Review at every iteration boundary even when the iteration was clean. The
+    # offline benchmark measured this as ~23% of all events waking the judge on
+    # *healthy* sessions, so the default is to wake on evidence: prompt start and
+    # session stop are always reviewed, an iteration boundary only when something
+    # in it did not come back clean.
+    review_clean_iterations: bool = False
     # Binding drift: acting on a near-miss sibling of the entity that was
     # resolved (arXiv 2607.18316). ``binding_similarity`` is the token-Jaccard
     # above which two paths are considered confusable.
@@ -140,7 +149,9 @@ class PolicyConfig:
             drift_target_fpr=float(data.get("drift_target_fpr", 0.05)),
             drift_horizon=int(data.get("drift_horizon", 120)),
             drift_adaptive_baseline=bool(data.get("drift_adaptive_baseline", True)),
+            drift_unknown_weight=float(data.get("drift_unknown_weight", 0.75)),
             drift_watch_fraction=float(data.get("drift_watch_fraction", 0.6)),
+            review_clean_iterations=bool(data.get("review_clean_iterations", False)),
             binding_enabled=bool(data.get("binding_enabled", True)),
             binding_similarity=float(data.get("binding_similarity", 0.6)),
             scope_nudge_unobserved=bool(data.get("scope_nudge_unobserved", False)),
@@ -228,7 +239,9 @@ class ShepherdConfig:
                 "drift_target_fpr": 0.05,
                 "drift_horizon": 120,
                 "drift_adaptive_baseline": True,
+                "drift_unknown_weight": 0.75,
                 "drift_watch_fraction": 0.6,
+                "review_clean_iterations": False,
                 "binding_enabled": True,
                 "binding_similarity": 0.6,
                 "scope_nudge_unobserved": False,

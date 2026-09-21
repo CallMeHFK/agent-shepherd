@@ -48,6 +48,8 @@ policy:
   drift_horizon: 120
   drift_adaptive_baseline: true
   drift_watch_fraction: 0.6
+  drift_unknown_weight: 0.75   # a lost response counts 75% as much as a failure
+  review_clean_iterations: false  # don't spend the judge on a clean boundary
   binding_enabled: true
   scope_allow_globs: []
   scope_deny_globs: ["*.env", "*.pem", ".git/*"]

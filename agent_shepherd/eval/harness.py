@@ -311,7 +311,10 @@ def format_table(report: dict[str, Any]) -> str:
         span = "-" if delay["mean"] is None else f"{delay['mean']:.1f}/{delay['max']}"
         nudges = sum(c["cost"]["nudges_emitted"] for c in report["cases"] if c["fault"] == kind)
         missing = sorted(set(block["requires"]) - set(report["meta"]["capabilities"]))
-        flag = f"  (needs {'+'.join(missing)})" if missing else ""
+        # Only claim a fault is out of reach when it actually was: the capability
+        # probes use the shipped defaults, and a stale "needs" tag next to a
+        # recall of 1.00 is worse than no tag.
+        flag = f"  (needs {'+'.join(missing)})" if missing and block["recall"] < 1.0 else ""
         lines.append(
             f"{kind:24s} {block['recall']:7.2f} {block['f1']:6.2f} {span:>11s} "
             f"{block['false_alarms_per_session']:8.2f} {block['repeats_per_session']:6.2f} "

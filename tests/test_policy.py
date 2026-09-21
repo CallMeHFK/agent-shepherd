@@ -25,7 +25,7 @@ def test_policy_engine_wakes_scorer_on_iteration_end():
 
     cfg = ShepherdConfig(
         judge=JudgeConfig(),
-        policy=PolicyConfig(),
+        policy=PolicyConfig(review_clean_iterations=True),
         agents={},
     )
     engine = PolicyEngine(cfg, Ledger(root="/tmp/shepherd-test-ledger"))
@@ -166,11 +166,15 @@ def test_inline_nudge_is_parked_and_drained_at_gate_boundary():
 
 
 def _engine_and_scorer(root: str, policy=None):
+    """Engine with a stubbed judge.
+
+    Defaults to ``review_clean_iterations`` so these tests exercise the judge
+    path regardless of the checkpoint-wake policy, which has its own tests."""
     from agent_shepherd.core.types import Verdict
 
     cfg = ShepherdConfig(
         judge=JudgeConfig(),
-        policy=policy or PolicyConfig(),
+        policy=policy or PolicyConfig(review_clean_iterations=True),
         agents={},
     )
     engine = PolicyEngine(cfg, Ledger(root=root))
@@ -297,7 +301,7 @@ def test_guidance_is_truncated_to_the_token_budget():
     from agent_shepherd.core.config import PolicyConfig as _PC
     from agent_shepherd.core.types import ToolCall, Verdict
 
-    policy = _PC(max_guidance_tokens=20)
+    policy = _PC(max_guidance_tokens=20, review_clean_iterations=True)
     cfg = ShepherdConfig(judge=JudgeConfig(), policy=policy, agents={})
     engine = PolicyEngine(cfg, Ledger(root="/tmp/shepherd-test-budget"))
     engine.scorer = FakeScorer(
@@ -361,7 +365,7 @@ def test_drift_hard_alarm_preempts_scorer():
         policy=PolicyConfig(drift_watch_fraction=1.0),
     )
     verdict = None
-    for i in range(4):
+    for i in range(10):
         verdict = engine.process(_result("wd2", "error: boom", iteration=i, ts=1_000_000.0 + i * 600.0))
     assert verdict is not None
     assert verdict.action == VerdictAction.NUDGE
@@ -491,3 +495,40 @@ def test_rulebook_can_be_disabled(tmp_path):
     )
     engine = PolicyEngine(cfg, Ledger(root=tmp_path))
     assert engine.rulebook is None
+
+
+def test_clean_iteration_end_no_longer_buys_a_judge_call():
+    """Measured cost, not a hypothetical: reviewing every iteration boundary
+    regardless of evidence woke the judge on ~23% of events in *healthy*
+    sessions. A clean iteration is now free; prompt start and session stop are
+    still always reviewed, and an iteration carrying a non-clean outcome still
+    wakes the reviewer."""
+    engine, scorer = _engine_and_scorer(
+        "/tmp/shepherd-test-checkpoint-wake", policy=PolicyConfig()
+    )
+
+    def it(sid, i):
+        return AgentEvent(
+            agent=Agent.CLAUDE, session_id=sid, event=EventType.ITERATION_END, ts=time.time(), iteration=i
+        )
+
+    assert engine.process(it("ck1", 1)).action == VerdictAction.PASS
+    assert scorer.calls == 0, "nothing happened, so nothing is reviewed"
+
+    # An iteration whose tool result did not come back clean is evidence.
+    engine.process(_result("ck2", "error: boom"))
+    engine.process(it("ck2", 2))
+    assert scorer.calls >= 1
+
+    # Prompt start remains a checkpoint unconditionally.
+    calls_before = scorer.calls
+    engine.process(
+        AgentEvent(
+            agent=Agent.CLAUDE,
+            session_id="ck3",
+            event=EventType.PROMPT_SUBMIT,
+            ts=time.time(),
+            prompt="do the thing",
+        )
+    )
+    assert scorer.calls == calls_before + 1

@@ -18,5 +18,5 @@ jobs:
       # The counterfactual benchmark is the regression net for "a threshold
       # change made the supervisor nag healthy sessions". Deterministic, offline,
       # Tier-1 stubbed.
-      - run: uv run python -m agent_shepherd.eval.harness --seed 7 --sessions 6 --steps 50 --fail-under-f1 0.7
+      - run: uv run python -m agent_shepherd.eval.harness --seed 7 --sessions 6 --steps 50 --fail-under-f1 0.8
       - run: uv run ruff check .

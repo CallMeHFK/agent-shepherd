@@ -41,6 +41,7 @@ from .config import ShepherdConfig
 from .judge.risk import RiskModel, truncate_guidance
 from .judge.tier1 import StepScorer
 from .ledger import Ledger
+from .rules import signals
 from .rules.detectors import (
     BindingDriftDetector,
     ContextRotDetector,
@@ -125,6 +126,7 @@ class PolicyEngine:
                 target_fpr=config.policy.drift_target_fpr,
                 horizon=config.policy.drift_horizon,
                 adaptive_baseline=config.policy.drift_adaptive_baseline,
+                unknown_weight=config.policy.drift_unknown_weight,
             )
             self.detectors.append(self._drift)
         self.scorer = StepScorer(config.judge)
@@ -266,8 +268,17 @@ class PolicyEngine:
         it supervises, so the expensive reviewer must stay asleep except when
         something actually starts to happen.
         """
-        if event.event in (EventType.PROMPT_SUBMIT, EventType.ITERATION_END, EventType.STOP):
+        if event.event in (EventType.PROMPT_SUBMIT, EventType.STOP):
             return True
+        if event.event == EventType.ITERATION_END:
+            if self.config.policy.review_clean_iterations:
+                return True
+            # An iteration whose every outcome came back clean is not evidence
+            # of anything; spending a reviewer on it is the cost side of the
+            # saturation trap measured by `shepherd eval`.
+            return any(
+                signals.classify(e).state != signals.OK for e in history if e.event == EventType.TOOL_RESULT
+            )
         if event.event == EventType.TOOL_RESULT and self._drift is not None:
             return self._drift.watch_level(event, history) >= self.config.policy.drift_watch_fraction
         return False

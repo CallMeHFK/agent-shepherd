@@ -233,22 +233,22 @@ def test_drift_detector_fires_on_sustained_failures():
 def test_drift_detector_watch_level_tracks_consecutive_failures():
     """The soft trigger is onset-shaped, not state-shaped.
 
-    The alarm line used to be calibrated for a single 16-step window, which made
-    two consecutive failures enough to wake the judge. Calibrating over a
-    120-step session (the budget the agent actually experiences, per
-    arXiv 2607.17336) raises the line, so it now takes three consecutive
-    failures to reach the watch fraction and four to hard-alarm. The property
-    that matters is unchanged: an isolated failure is silent, and the statistic
-    climbs monotonically with a sustained run.
+    The alarm line is a calibrated output (a Monte-Carlo fit against a
+    session-length false-alarm budget over a graded null model), so the exact
+    number of failures that crosses it moves whenever the calibration changes.
+    Pinning the constant would only make this test churn; what must not change
+    is the shape: monotone in the length of the failing run, silent at one
+    isolated failure, and reaching the alarm within a single window.
     """
     detector = CUSUMDriftDetector()
     bad = ev(event=EventType.TOOL_RESULT, tool=ToolCall(name="shell"), result="error: x")
-    levels = [detector.watch_level(bad, [bad] * n) for n in range(5)]
+    levels = [detector.watch_level(bad, [bad] * n) for n in range(detector.window)]
     assert levels == sorted(levels), "monotone in the length of the failing run"
     assert 0 < levels[0] < 0.6, "one failure stays below the watch fraction"
-    assert levels[1] < 0.6 <= levels[2], "the third consecutive failure crosses it"
-    assert levels[3] >= 1.0, "the fourth reaches the hard alarm"
-    # The calibrated threshold keeps false alarms within the 5% session budget.
+    assert levels[-1] >= 1.0, "a window full of failures reaches the hard alarm"
+    crossing = next((n for n, level in enumerate(levels) if level >= 0.6), None)
+    assert crossing is not None and crossing >= 1, "the soft trigger sits above a single failure"
+    # The calibrated threshold keeps false alarms within the session budget.
     assert detector.threshold > 1.0
 
 
