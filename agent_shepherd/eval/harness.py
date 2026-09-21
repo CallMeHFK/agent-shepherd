@@ -22,6 +22,7 @@ import shutil
 import sys
 import tempfile
 import time
+from pathlib import Path
 from typing import Any
 
 from ..core.config import JudgeConfig, PolicyConfig, ShepherdConfig
@@ -181,6 +182,7 @@ def _run_session(
                 action=verdict.action.value,
                 detector=verdict.detector,
                 reason=verdict.reason,
+                confidence=float(verdict.confidence or 0.0),
             )
         )
         cost.events_ingested += 1
@@ -228,6 +230,62 @@ def _case(
         cost=cost,
         tolerance=tolerance,
     )
+
+
+def fit_risk_from_report(
+    report: dict[str, Any],
+    *,
+    out_path: Path | str,
+    prior: float = 0.6,
+    target_fpr: float = 0.05,
+    min_samples: int = 20,
+    key: str = "judge",
+) -> dict[str, Any]:
+    """Fold the benchmark's by-construction labels into the admission thresholds.
+
+    The live engine can only label a judge nudge by "did Tier 0 also confirm
+    drift", which trains the judge toward agreeing with the detectors. Here the
+    label is a fact of the corpus: the fault was injected at a step we chose, or
+    it was not injected at all. That is the label a threshold should be fitted
+    against, so `shepherd eval --judge --fit-risk` can write one the daemon will
+    actually read.
+
+    Only judge verdicts are used: they are the ones ``PolicyEngine._control``
+    gates. Returns the fitted state so a caller can print it.
+    """
+    from ..core.judge.risk import RiskModel
+
+    model = RiskModel.load(
+        {"judge": prior, "judge_block": max(prior, 0.85)},
+        target_fpr=target_fpr,
+        min_samples=min_samples,
+        path=out_path,
+    )
+    seen = 0
+    for case in report.get("cases", []):
+        is_drift = bool(case.get("is_drift"))
+        for verdict in case.get("verdicts") or []:
+            detector = verdict.get("detector") if isinstance(verdict, dict) else getattr(verdict, "detector", None)
+            if detector != "judge":
+                continue
+            conf = verdict.get("confidence") if isinstance(verdict, dict) else getattr(verdict, "confidence", 0.0)
+            model.observe(key, float(conf or 0.0), is_drift)
+            seen += 1
+    if seen == 0:
+        return {"fitted": False, "reason": "no judge verdicts in this report (run with --judge)"}
+    samples = model.samples.get(key)
+    threshold = model.refit(key)
+    model.save()
+    return {
+        "fitted": key in model.thresholds,
+        "threshold": threshold,
+        "prior": prior,
+        "judge_verdicts_labeled": seen,
+        "clean_labels": len(samples.clean_scores) if samples else 0,
+        "drift_labels": len(samples.drift_scores) if samples else 0,
+        "min_samples": min_samples,
+        "path": str(out_path),
+    }
 
 
 def run_benchmark(
@@ -345,6 +403,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", metavar="OUT", help="write the full report to OUT")
     parser.add_argument("--fail-under-f1", type=float, default=None, help="exit 1 if overall F1 is lower")
     parser.add_argument("--judge", action="store_true", help="enable Tier 1 (needs a judge endpoint)")
+    parser.add_argument(
+        "--fit-risk",
+        metavar="OUT",
+        nargs="?",
+        const="",
+        default=None,
+        help="fit admission thresholds from the corpus labels and write risk.json "
+        "(default $SHEPHERD_HOME/risk.json, or OUT if given); needs --judge",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -363,6 +430,26 @@ def main(argv: list[str] | None = None) -> int:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=1, sort_keys=True)
         print(f"report written to {args.json}")
+    if args.fit_risk is not None:
+        from ..core.ledger import default_root
+
+        out = Path(args.fit_risk) if args.fit_risk else default_root() / "risk.json"
+        fitted = fit_risk_from_report(report, out_path=out)
+        if not fitted.get("fitted") and fitted.get("threshold") is None:
+            print(f"--fit-risk: {fitted.get('reason', 'nothing to fit')}", file=sys.stderr)
+            return 2
+        if fitted.get("fitted"):
+            print(
+                f"risk threshold fitted: {fitted['prior']:.2f} -> {fitted['threshold']:.2f} "
+                f"from {fitted['judge_verdicts_labeled']} labeled judge verdicts "
+                f"({fitted['clean_labels']} clean / {fitted['drift_labels']} drift) -> {fitted['path']}"
+            )
+        else:
+            print(
+                f"risk threshold left at the prior ({fitted['threshold']:.2f}): "
+                f"{fitted['judge_verdicts_labeled']} verdicts labeled, "
+                f"needs >= {fitted['min_samples']} clean ones -> {fitted['path']}"
+            )
     f1 = report["summary"]["overall"]["f1"]
     if args.fail_under_f1 is not None and f1 < args.fail_under_f1:
         print(f"FAIL: overall F1 {f1:.3f} < {args.fail_under_f1:.3f}", file=sys.stderr)

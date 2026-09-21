@@ -137,6 +137,12 @@ detection delay in steps, and the false-alarm rate on clean sessions. The
 benchmark is the answer to "is the supervisor worth its own cost?" — run it
 before and after changing any threshold.
 
+Because the benchmark knows by construction whether a session drifted, it is also
+the only place the admission thresholds can be fitted against a real label:
+`shepherd eval --judge --fit-risk [path]`. Fitting from live sessions uses a
+weaker label -- "did a Tier 0 detector also confirm drift" -- which trains the
+judge to agree with the detectors rather than to be right.
+
 ## Tests
 
 ```bash

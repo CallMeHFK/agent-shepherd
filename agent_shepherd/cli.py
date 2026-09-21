@@ -96,11 +96,14 @@ def main(argv: list[str] | None = None) -> int:
         import subprocess
 
         cfg.ensure_defaults()
+        if args.port:
+            cfg.port = int(args.port)
         _pidfile().parent.mkdir(parents=True, exist_ok=True)
         log = _pidfile().with_suffix(".log")
         with open(log, "ab") as fh:
             proc = subprocess.Popen(
-                [sys.executable, "-m", "agent_shepherd.cli", "start"],
+                [sys.executable, "-m", "agent_shepherd.cli", "start"]
+                + ([ "--port", str(args.port)] if args.port else []),
                 stdout=fh,
                 stderr=fh,
                 start_new_session=True,
@@ -114,8 +117,29 @@ def main(argv: list[str] | None = None) -> int:
                 },
             )
         _pidfile().write_text(str(proc.pid))
-        print(f"daemon started pid={proc.pid}, log={log}")
-        return 0
+        # Returning here would report success for a process that is not yet
+        # listening: the drift detector's Monte-Carlo fit runs before the socket
+        # is bound, so for several seconds every adapter POST is refused and the
+        # hook answers {} -- indistinguishable from "healthy, nothing to say".
+        # That is exactly how a real "detector does not fire" report turned out to
+        # be a readiness bug, so wait for /health before claiming anything.
+        url = f"http://127.0.0.1:{cfg.port}"
+        import httpx
+
+        deadline = time.time() + 90.0
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                print(f"daemon exited rc={proc.returncode}; see {log}", file=sys.stderr)
+                _pidfile().unlink(missing_ok=True)
+                return 1
+            try:
+                if httpx.get(f"{url}/health", timeout=2.0, trust_env=False).json().get("ok"):
+                    print(f"daemon ready pid={proc.pid} on {url} (log={log})")
+                    return 0
+            except Exception:  # noqa: BLE001 - still starting
+                time.sleep(0.4)
+        print(f"daemon pid={proc.pid} never became healthy on {url}; see {log}", file=sys.stderr)
+        return 1
 
     if args.command == "stop":
         import signal

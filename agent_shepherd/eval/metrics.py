@@ -48,6 +48,10 @@ class StepVerdict:
     action: str
     detector: str | None = None
     reason: str = ""
+    # Carried because the admission thresholds are fitted from it: a benchmark
+    # report that records which verdict fired but not how confident it was can
+    # score detection but cannot calibrate a risk bound.
+    confidence: float = 0.0
 
     @property
     def fired(self) -> bool:

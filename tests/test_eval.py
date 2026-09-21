@@ -308,3 +308,49 @@ def test_cli_reports_and_enforces_the_f1_gate(report, tmp_path, capsys):
     assert harness.main(["--seed", "7", "--sessions", "2", "--steps", "40", "--fail-under-f1", "0.99"]) == 1
     assert harness.main(["--seed", "7", "--sessions", "2", "--steps", "40", "--fail-under-f1", "0.1"]) == 0
     assert harness.main(["--fault", "not-a-fault"]) == 2
+
+
+def test_verdict_confidence_is_carried_into_the_report(tmp_path):
+    """The report must keep the score, not only the action.
+
+    A corpus that says "a verdict fired at step 9" but drops its confidence can
+    score detection yet never calibrate the admission threshold that decides
+    whether a judge nudge is allowed to reach the agent at all.
+    """
+    report = harness.run_benchmark(detectors_only=True, seed=11, sessions_per_fault=1, steps=40)
+    cases = [c for c in report["cases"] if c["fault"] == "exact_loop"]
+    assert cases
+    fired = [v for v in cases[0]["verdicts"] if (v.get("detector") if isinstance(v, dict) else v.detector) == "loop"]
+    assert fired
+    conf = getattr(fired[0], "confidence", None) if not isinstance(fired[0], dict) else fired[0]["confidence"]
+    assert conf and conf > 0.5, "loop verdicts carry their configured confidence"
+
+
+def test_fit_risk_uses_construction_labels_and_respects_the_evidence_floor(tmp_path):
+    out = tmp_path / "risk.json"
+    drift = [{"is_drift": True, "verdicts": [{"detector": "judge", "confidence": 0.95}]} for _ in range(4)]
+    clean = [
+        {
+            "is_drift": False,
+            "verdicts": [
+                {"detector": "judge", "confidence": 0.4},
+                {"detector": "loop", "confidence": 0.95},  # not the judge's, ignored
+            ],
+        }
+        for _ in range(24)
+    ]
+    result = harness.fit_risk_from_report({"cases": drift + clean}, out_path=out, prior=0.6)
+    assert result["fitted"] is True
+    assert result["threshold"] > 0.4 and result["threshold"] <= 0.6
+    assert result["clean_labels"] == 24 and result["drift_labels"] == 4
+    assert out.exists()
+    # A verdict-only-once corpus is not evidence: the prior must stand.
+    thin = harness.fit_risk_from_report(
+        {"cases": [{"is_drift": False, "verdicts": [{"detector": "judge", "confidence": 0.9}]}]},
+        out_path=tmp_path / "thin.json",
+        prior=0.6,
+    )
+    assert thin["fitted"] is False and thin["threshold"] == 0.6
+    # And a report with no judge verdicts says so instead of writing noise.
+    none = harness.fit_risk_from_report({"cases": []}, out_path=tmp_path / "none.json")
+    assert none.get("fitted") is False and "no judge verdicts" in none.get("reason", "")

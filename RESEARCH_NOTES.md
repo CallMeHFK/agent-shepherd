@@ -485,8 +485,11 @@ mechanism look working while doing nothing:
 confirmed drift somewhere in this session". That makes the fitted admission line
 concordant with the detectors, which is not the same as correct, and it will pull
 the judge toward agreeing with Tier 0 rather than toward being right. The
-by-construction label exists only in `shepherd eval`, so a threshold that matters
-should be fitted there.
+by-construction label exists only in `shepherd eval`, and
+`shepherd eval --judge --fit-risk` now writes that one out (the report also had to
+start carrying each verdict's confidence, which it silently was not -- a corpus
+that records what fired but not how sure it was can score detection and still
+never calibrate a risk bound).
 
 ### 18. Startup cost: the supervisor was absent for its first ~8 seconds
 
