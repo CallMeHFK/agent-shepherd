@@ -180,6 +180,17 @@ shepherd stop               # SIGTERM the start-bg process
 shepherd risk               # which admission thresholds are in force, prior or calibrated
 ```
 
+Two operational traps worth knowing about, both found the hard way:
+
+* **Two checkouts, one command.** `pip install -e` records a path, and if two
+  copies of this project are installed the winner depends on your working
+  directory -- so `shepherd` can run weeks-old code from a different checkout and
+  a new feature looks broken. `shepherd status` prints `code loaded from: ...`;
+  check it before debugging.
+* **The unit restarts on SIGTERM.** With `Restart=always` (needed, or a killed
+  daemon leaves the machine quietly unsupervised), stop it intentionally through
+  `systemctl --user stop shepherd`, not `shepherd stop`.
+
 For a machine that should always be supervising, install the shipped systemd
 user unit (no root required). It is deliberately not enabled by the installer:
 turning on a background process that injects text into your agents is your

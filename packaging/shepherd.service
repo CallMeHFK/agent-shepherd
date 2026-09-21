@@ -14,8 +14,14 @@ Environment=PYTHONUNBUFFERED=1
 # Environment=SHEPHERD_JUDGE_BASE_URL=http://127.0.0.1:19991/v1
 # Environment=SHEPHERD_JUDGE_MODEL=...
 # Environment=SHEPHERD_JUDGE_API_KEY=...
-Restart=on-failure
+# `on-failure` is not enough here: systemd treats a SIGTERM kill as an expected
+# stop and will not restart, which is exactly how a supervised machine ends up
+# quietly unsupervised (observed: killing the daemon left the unit inactive with
+# `code=killed, signal=TERM` and no restart). Always restart, and stop it through
+# systemctl --user stop, which is an intentional job and will not come back.
+Restart=always
 RestartSec=2
+TimeoutStopSec=5
 Nice=10
 
 [Install]

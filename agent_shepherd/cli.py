@@ -161,6 +161,14 @@ def main(argv: list[str] | None = None) -> int:
         import httpx
 
         url = os.environ.get("SHEPHERD_DAEMON_URL", "http://127.0.0.1:4890").rstrip("/")
+        # Print which copy of the package this command actually loaded. Two
+        # checkouts of the same project can both be pip-installed, and the stale
+        # one wins depending on the working directory -- which makes "the new
+        # feature is not working" look like a code bug when it is a provenance
+        # problem. One line here settles it before anyone spends time on that.
+        from . import cli as _self
+
+        print(f"code loaded from: {Path(_self.__file__).parent}")
         try:
             ok = httpx.get(f"{url}/health", timeout=2.0, trust_env=False).json().get("ok")
             print(f"daemon {url}: {'up' if ok else 'unexpected response'}")
