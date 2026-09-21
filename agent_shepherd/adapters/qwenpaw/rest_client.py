@@ -32,20 +32,20 @@ class QwenPawRestClient:
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         try:
-            with httpx.Client(timeout=5.0) as client:
+            with httpx.Client(timeout=5.0, trust_env=False) as client:
                 resp = client.post(f"{self.daemon_url}{path}", json=payload)
             resp.raise_for_status()
             return resp.json()
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError, ImportError):
             return None
 
     def _qwen_get(self, path: str) -> dict[str, Any] | None:
         try:
-            with httpx.Client(timeout=5.0) as client:
+            with httpx.Client(timeout=5.0, trust_env=False) as client:
                 resp = client.get(f"{self.base_url}{path}")
             resp.raise_for_status()
             return resp.json()
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError, ImportError):
             return None
 
     def poll(self, agent_id: str, session_id: str) -> None:
@@ -98,6 +98,6 @@ class QwenPawRestClient:
         while True:
             try:
                 self.poll(agent_id, session_id)
-            except (httpx.HTTPError, ValueError) as exc:
+            except (httpx.HTTPError, ValueError, ImportError) as exc:
                 logger.warning("QwenPaw REST poll failed: %s", exc)
             time.sleep(interval)

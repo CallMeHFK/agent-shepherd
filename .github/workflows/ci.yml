@@ -11,5 +11,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --all-extras
-      - run: uv run pytest -q
+      # `python -m pytest`, not a bare `pytest`: without the dev group installed,
+      # a bare pytest can resolve outside this environment and import a stale
+      # installed copy of the package, reporting green against deleted code.
+      - run: uv run python -m pytest -q
+      # The counterfactual benchmark is the regression net for "a threshold
+      # change made the supervisor nag healthy sessions". Deterministic, offline,
+      # Tier-1 stubbed.
+      - run: uv run python -m agent_shepherd.eval.harness --seed 7 --sessions 6 --steps 50 --fail-under-f1 0.7
       - run: uv run ruff check .

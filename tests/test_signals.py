@@ -71,7 +71,7 @@ def test_lost_response_is_unknown_not_ok():
 
 
 def test_offspec_uses_the_session_contract_not_just_prompt_words():
-    detector = OffSpecDetector()
+    detector = OffSpecDetector(nudge_unobserved=True)
     history = [
         call("read_file", path="src/lexer.py"),
         result("def tokenize(): ...", exit_code=0),

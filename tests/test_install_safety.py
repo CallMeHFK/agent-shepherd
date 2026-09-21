@@ -70,3 +70,27 @@ def test_codex_install_keeps_existing_groups(home):
     assert group["matcher"] == "Bash" and group["hooks"] == [mine], "foreign group untouched"
     assert any(g.get("matcher") == "*" for g in after["hooks"]["PreToolUse"][1:]), "ours appended"
     assert after["description"] == "user"
+
+
+def test_hook_survives_a_socks_proxy_environment(monkeypatch):
+    """Regression: with ALL_PROXY=socks5:// every hook call raised ImportError
+    (httpx needs an optional extra for SOCKS), so the installed hook crashed on
+    every tool call instead of failing open. Daemon calls are loopback and must
+    not inherit proxy environment."""
+    from agent_shepherd.adapters.claude import hook as chook
+
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+    monkeypatch.setenv("HTTPS_PROXY", "socks5://127.0.0.1:1080")
+    monkeypatch.setenv("SHEPHERD_DAEMON_URL", "http://127.0.0.1:1")
+    # Pre-fix this raised ImportError out of httpx.Client(...) instead of
+    # returning None, which surfaced as a traceback in the agent's hook output.
+    assert chook._post("/ingest/claude", {"a": 1}) is None
+
+
+def test_hook_never_raises_when_the_daemon_is_down(monkeypatch):
+    """A supervisor the agent cannot reach must be invisible, not fatal."""
+    from agent_shepherd.adapters.claude import hook as chook
+
+    monkeypatch.setenv("SHEPHERD_DAEMON_URL", "http://127.0.0.1:1")  # nothing listening
+    assert chook._post("/ingest/claude", {"a": 1}) is None
+    assert chook._response(None) == {}

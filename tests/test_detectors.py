@@ -134,7 +134,9 @@ def test_regression_detector_reads_structured_exit_code():
 
 
 def test_offspec_detector_fires_on_unrelated_edits():
-    detector = OffSpecDetector()
+    # The unobserved-path nudge is opt-in: measured at ~1 false positive per
+    # healthy session, so the default is deny-globs only.
+    detector = OffSpecDetector(nudge_unobserved=True)
     current = ev(
         event=EventType.TOOL_CALL,
         tool=ToolCall(name="write_file", input={"path": "src/unrelated.py"}),

@@ -23,12 +23,18 @@ def _daemon_url() -> str:
 
 
 def _post(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    # trust_env=False: the daemon is a loopback service, so honoring
+    # HTTP(S)_PROXY / ALL_PROXY here would both fail (a SOCKS proxy needs an
+    # optional extra) and send agent telemetry through an unrelated proxy.
     try:
-        with httpx.Client(timeout=5.0) as client:
+        with httpx.Client(timeout=5.0, trust_env=False) as client:
             resp = client.post(f"{_daemon_url()}{path}", json=payload)
         resp.raise_for_status()
         return resp.json()
-    except (httpx.HTTPError, ValueError):
+    except Exception:  # noqa: BLE001
+        # A supervisor that raises on every tool call when its daemon is
+        # unreachable is worse than no supervisor: the host harness treats a
+        # crashing hook as an error on the action, not as a silent pass.
         return None
 
 

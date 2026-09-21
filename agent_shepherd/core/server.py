@@ -110,6 +110,7 @@ class PolicyEngine:
             OffSpecDetector(
                 allow_globs=config.policy.scope_allow_globs,
                 deny_globs=config.policy.scope_deny_globs,
+                nudge_unobserved=config.policy.scope_nudge_unobserved,
             ),
             ContextRotDetector(),
         ]

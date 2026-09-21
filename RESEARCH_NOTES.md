@@ -307,13 +307,76 @@ not an auxiliary statistic.
   value is. This is the design principle behind keeping Tier 0 cheap and
   broad, and Tier 1 advisory rather than corrective.
 
+### 12. A counterfactual benchmark, which immediately changed a default
+
+**What changed:** `agent_shepherd/eval/` (scenarios + metrics + harness) and
+`shepherd eval`, wired into CI with `--fail-under-f1`. Scripted healthy sessions
+plus a fault injector that breaks exactly one thing at a *known* step, scored
+for per-fault recall, detection delay in steps, false alarms per session,
+repeats, and supervision cost. Tier 1 is stubbed, so it is deterministic,
+offline and free.
+
+**Why:** *trajectory-judge* — <https://arxiv.org/abs/2609.00038> — measures what
+outcome-only judging misses using exactly this construction (deterministic
+environment, scripted oracle, one fault at a known step); *ToolRobustBench*
+(<https://arxiv.org/abs/2608.23635>) localizes failure stage-wise;
+*What Twelve LLM Agent Benchmark Papers Disclose About Themselves*
+(<https://arxiv.org/abs/2605.21404>) is why the harness prints its own cost
+columns instead of only accuracy.
+
+**What it found on the first run (and what we did):** the new off-spec rule —
+"edit only paths named in the goal, allow-globbed, or already observed" — fired
+**1.0 false nudge per clean session**, mostly on perfectly normal work (writing a
+brand-new test file, editing a file a repo-wide grep had surfaced). Requiring a
+file to have been *read* before it may be edited conflates novelty with
+overstepping authority, and a detector that costs one nudge per healthy session
+is the saturation failure in item 2 all over again. `scope_nudge_unobserved` is
+therefore **off by default** (deny-globs still BLOCK, which is the
+authority-relevant half), and measured false alarms on clean sessions went
+1.00 → 0.00 with aggregate F1 0.62 → 0.79. Recall on the `offspec_edit` fault
+dropped to 0 by the same switch: Tier 0 cannot answer that one under the default
+policy, and the harness marks it `(unanswerable here)` rather than hiding it.
+
+**Still open after the benchmark:** `sustained_drift` alarms ~13 steps after
+onset and cost 0.17 false alarms per session; `ambiguous_tool_loss` is not
+detectable by Tier 0 at all (an empty result is *unobserved*, not evidence).
+Judge wake rate is ~20% of events, which is the number item 11 exists to make
+visible.
+
+### 13. The installed hook must not be able to break the agent
+
+**What changed:** daemon calls from the adapters use `trust_env=False`, and the
+hook thin-shells fail open on *any* exception.
+
+**Why:** found by running the real chain after installing, not by a unit test —
+with `ALL_PROXY=socks5://…` in the environment, `httpx.Client(...)` raises
+`ImportError` (SOCKS support is an optional extra), so `shepherd-hook claude`
+produced a traceback on **every tool call**. Catching only `HTTPError` let it
+through. A supervisor unreachable on a proxy-configured machine must be
+invisible, not fatal; it must also not route loopback telemetry through an
+unrelated proxy.
+
+Also fixed the same class of failure in the dev workflow: `pytest` was only an
+optional extra, so a bare `uv run pytest` could resolve outside the project
+environment, import a stale installed copy of `agent_shepherd`, and report
+**green tests against code no longer on disk** — which is exactly what it did
+here before `dependency-groups` was declared.
+
+### Not shipped in this round
+
+`core/rules/rulebook.py` (follow-up 1) is written with 65 passing tests, but 4
+of its adherence tests disagree with the detector ordering the second sweep
+introduced, so it is held out rather than merged red. Its ledger analysis is
+independent of the engine and can land on its own.
+
 ## Follow-ups considered, not implemented
 
 1. **Shepherd rulebook injection into the live loop** — *Meta-Policy Reflexion*
    (<https://arxiv.org/abs/2509.03990>): the adherence analysis and the rendered
-   "house rules" header exist (`core/rules/rulebook.py`), but the engine does not
-   yet inject that header at `PROMPT_SUBMIT`. The ledger already records
-   everything needed; this is wiring, not research.
+   "house rules" header exist in `core/rules/rulebook.py` (held out of the
+   branch, see "Not shipped in this round"), and the engine does not yet inject
+   that header at `PROMPT_SUBMIT`. The ledger already records everything needed;
+   this is wiring, not research.
 2. **Graph-based credit assignment** — GDCR (2605.29697): replace the
    "name the origin step" heuristic with a causal graph over steps for the
    judge's verdict. Higher precision, much more machinery.

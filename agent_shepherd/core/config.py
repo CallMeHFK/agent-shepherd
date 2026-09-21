@@ -106,6 +106,10 @@ class PolicyConfig:
     # Delegation contract for the off-spec detector: an edit is admissible when
     # the path is named in the goal, matched by an allow-glob, or already
     # observed this session. Deny-globs are checked first and BLOCK.
+    # Nudge on edits to a path nothing in the session named, allowed or read.
+    # Off by default: measured at ~1 false nudge per healthy session, and
+    # writing a brand-new test file trips it.
+    scope_nudge_unobserved: bool = False
     scope_allow_globs: list[str] = field(default_factory=list)
     scope_deny_globs: list[str] = field(default_factory=list)
     # Conformal risk control: the per-source false-intervention budget the
@@ -139,6 +143,7 @@ class PolicyConfig:
             drift_watch_fraction=float(data.get("drift_watch_fraction", 0.6)),
             binding_enabled=bool(data.get("binding_enabled", True)),
             binding_similarity=float(data.get("binding_similarity", 0.6)),
+            scope_nudge_unobserved=bool(data.get("scope_nudge_unobserved", False)),
             scope_allow_globs=_globs("scope_allow_globs"),
             scope_deny_globs=_globs("scope_deny_globs"),
             risk_target_fpr=float(data.get("risk_target_fpr", 0.05)),
@@ -226,6 +231,7 @@ class ShepherdConfig:
                 "drift_watch_fraction": 0.6,
                 "binding_enabled": True,
                 "binding_similarity": 0.6,
+                "scope_nudge_unobserved": False,
                 "scope_allow_globs": [],
                 "scope_deny_globs": ["*.env", "*.pem", ".git/*", "*.secret*"],
                 "risk_target_fpr": 0.05,

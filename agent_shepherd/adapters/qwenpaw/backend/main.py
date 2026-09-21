@@ -36,9 +36,14 @@ def _daemon_url() -> str:
 
 
 def _post(path: str, payload: dict[str, Any], timeout: float = 5.0) -> dict[str, Any] | None:
-    """POST to the daemon; fail open on any error."""
+    """POST to the daemon; fail open on any error.
+
+    ``trust_env=False`` because the daemon is loopback: inheriting ALL_PROXY
+    makes every call raise (SOCKS support is an optional httpx extra), which on
+    a proxy-configured machine would silently disable supervision entirely.
+    """
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, trust_env=False) as client:
             resp = client.post(f"{_daemon_url()}{path}", json=payload)
         resp.raise_for_status()
         return resp.json()
@@ -116,9 +121,9 @@ def _agent_session_id(agent: Any) -> str:
 
 
 def _get(path: str, timeout: float = 2.0) -> dict[str, Any] | None:
-    """GET from the daemon; fail open on any error."""
+    """GET from the daemon; fail open on any error (loopback, see _post)."""
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, trust_env=False) as client:
             resp = client.get(f"{_daemon_url()}{path}")
         resp.raise_for_status()
         return resp.json()

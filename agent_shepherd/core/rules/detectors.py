@@ -184,17 +184,29 @@ class OffSpecDetector(Detector):
     This version models the contract explicitly, following the delegation-contract
     framing (arXiv 2606.17099) and the deterministic-compliance-check result that
     an SMT/solver-side admissibility check beats asking a model (arXiv
-    2603.20449): a path is admissible if it is named in the goal, matched by a
-    configured allow-pattern, **or was already observed this session** (reading
-    or grepping a file establishes that it is in play). Deny-patterns are checked
-    first and are hard-blocked where the agent has block enabled.
+    2603.20449): deny-patterns are checked first and hard-BLOCKed.
+
+    ``nudge_unobserved`` additionally flags edits to a path nothing in the
+    session named, allowed or read. It defaults to **off** because the offline
+    benchmark measured it at one false nudge per healthy session (the offline
+    benchmark, ``shepherd eval``): creating a new test file, or editing a file
+    found by a repo-wide grep, is normal competent work. Novelty is not the
+    same thing as exceeding one's authority, and a detector that costs the
+    agent a nudge per healthy session is the saturation failure the whole
+    design exists to avoid.
     """
 
     name = "offspec"
 
-    def __init__(self, allow_globs: list[str] | None = None, deny_globs: list[str] | None = None):
+    def __init__(
+        self,
+        allow_globs: list[str] | None = None,
+        deny_globs: list[str] | None = None,
+        nudge_unobserved: bool = False,
+    ):
         self.allow_globs = allow_globs or []
         self.deny_globs = deny_globs or []
+        self.nudge_unobserved = nudge_unobserved
 
     def _mentioned_paths(self, event: AgentEvent) -> set[str]:
         prompt = event.prompt or ""
@@ -251,7 +263,7 @@ class OffSpecDetector(Detector):
             or edited in self._observed_paths(history)
             or any(fnmatch(edited, g) or fnmatch(f"/{edited}", g) for g in self.allow_globs)
         )
-        if in_scope:
+        if in_scope or not self.nudge_unobserved:
             return None
         # Nothing named it, nothing read it, nothing allows it.
         return Verdict(
