@@ -16,6 +16,7 @@ import random
 import re
 from abc import ABC, abstractmethod
 from fnmatch import fnmatch
+from pathlib import Path
 
 from ..types import AgentEvent, EventType, Verdict, VerdictAction
 from . import signals
@@ -440,6 +441,40 @@ class ContextRotDetector(Detector):
 _CUSUM_THRESHOLD_CACHE: dict[tuple, float] = {}
 
 
+def _threshold_cache_path() -> Path:
+    from ..ledger import default_root
+
+    return default_root() / "cusum_thresholds.json"
+
+
+def _read_threshold_cache() -> dict[str, float]:
+    """Persisted mirror of the in-process memo.
+
+    The calibration is ~24 Monte-Carlo passes x 20k sessions x a 120-step
+    horizon. That is fine once and unacceptable every time the daemon starts:
+    for the ~15s it took, every hook call failed open and the supervisor was
+    silently absent. Because the fit is seeded and deterministic, the answer can
+    be cached on disk and reused verbatim.
+    """
+    path = _threshold_cache_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {str(k): float(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+
+def _write_threshold_cache(cache: dict[str, float]) -> None:
+    path = _threshold_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cache, indent=1, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass  # a cold start is allowed to be slow; it must not be fatal
+
+
 class CUSUMDriftDetector(Detector):
     """Detect *sustained* drift with a one-sided CUSUM over a cheap failure signal.
 
@@ -498,12 +533,20 @@ class CUSUMDriftDetector(Detector):
         self.adaptive_baseline = adaptive_baseline
         self.min_baseline_samples = min_baseline_samples
         key = (self.horizon, baseline, slack, target_fpr, seed, n_sim, unknown_weight)
+        disk_key = json.dumps([str(x) for x in key])
         cached = _CUSUM_THRESHOLD_CACHE.get(key)
+        if cached is None:
+            cached = _read_threshold_cache().get(disk_key)
+            if cached is not None:
+                _CUSUM_THRESHOLD_CACHE[key] = cached
         if cached is None:
             cached = self._calibrate(
                 self.horizon, window, baseline, slack, target_fpr, seed, n_sim, unknown_weight
             )
             _CUSUM_THRESHOLD_CACHE[key] = cached
+            disk = _read_threshold_cache()
+            disk[disk_key] = cached
+            _write_threshold_cache(disk)
         self.threshold = cached
 
     def _baseline_for(self, reference: list[AgentEvent]) -> float:

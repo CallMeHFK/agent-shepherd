@@ -423,3 +423,87 @@ into a rule — only the fixed detector texts are.
    third state, but the guidance text still tells the agent to "read the error
    output" — which is useless when nothing came back. A retry-vs-verify-side-
    effect branch (Did It Happen?) belongs in the prompt, not in the detector.
+
+## Third round: things the tests could not see
+
+### 15. Two measured corrections: what the statistic folds over, and what a checkpoint buys
+
+**The drift statistic was folding over the wrong domain.** `_statistic` summed
+every event in the window, but only tool results carry signal, so each
+interleaved call contributed `0.0 - slack` of decay. Consequence: a session whose
+tool responses keep disappearing -- the exact non-atomic failure item 6 introduced
+UNKNOWN to catch -- could *never* reach its alarm line. The benchmark reported
+this honestly as `ambiguous_tool_loss: 0.00 recall, unanswerable`, and a test even
+pinned the limitation as if it were a property. The sum now runs over results only
+and an unobservable outcome is credited at 0.75 rather than 0.5: that fault
+measures recall 1.00 at a 15-step delay, clean-session false alarms stay 0.00,
+aggregate F1 0.84 -> 0.88, and `sustained_drift` delay improved 13 -> 7 steps.
+
+**Reviewing every iteration boundary was the dominant cost.** With Tier 1 gated on
+natural checkpoints, `ITERATION_END` woke the judge on ~23% of events in *healthy*
+sessions. The reviewer now wakes at prompt start and session stop unconditionally,
+and at an iteration boundary only when something in it did not come back clean
+(`policy.review_clean_iterations` restores the old behaviour). Judge wakes over
+the benchmark corpus: 660 -> 369 at strictly better recall.
+
+Both are onset-based readings of the same argument as item 2 (arXiv 2606.04296):
+spend the expensive reviewer on evidence, not on schedule. Neither showed up in a
+unit test -- one came from a benchmark case that reported itself unanswerable
+instead of being quietly dropped, the other from a cost column nobody had read.
+
+### 16. The judge's product is a sentence, not a score
+
+The Tier 1 prompt now asks for a verbal per-step critique -- up to three worst
+steps, one <=30-word sentence each naming what the step assumed and what the
+evidence says instead -- and `parse_verdict` folds those into the recorded reason.
+*Verbal Process Supervision Elicits Better Coding Agents* —
+<https://arxiv.org/abs/2503.18494> — finds natural-language step feedback beats
+scalar process rewards; here it cost no machinery, only a field the parser was
+already tolerant of, and a judge that ignores the instruction degrades to the
+previous behaviour rather than failing.
+
+### 17. Making the calibration actually receive labels
+
+Item 10's fitter had no caller: `note_outcome` was never invoked, so the
+"calibrated" thresholds were permanently the configured prior while looking
+calibrated. Connecting it surfaced three defects that would each have made the
+mechanism look working while doing nothing:
+
+* learning steps hung off `STOP` *after* the parked-verdict drain, and the drain
+  returns early, so a session that ended holding a verdict never learned. Session
+  finalization now runs before any early return.
+* `refit` stored its fallback when evidence was thin, and `threshold_for` read
+  that stored fallback back as a calibrated value. For a per-agent key whose prior
+  lives under the base name, that pinned the gate at 1.0 and would have vetoed
+  every judge verdict for any newly seen agent. An under-evidenced key is now left
+  explicitly unfitted.
+* the fitted threshold was rounded to nearest, which can land below the grid point
+  that satisfied the budget -- a risk bound broken by its last decimal. It rounds
+  up now.
+
+**The label, and its honest limit.** Live, the label is "Tier 0 independently
+confirmed drift somewhere in this session". That makes the fitted admission line
+concordant with the detectors, which is not the same as correct, and it will pull
+the judge toward agreeing with Tier 0 rather than toward being right. The
+by-construction label exists only in `shepherd eval`, so a threshold that matters
+should be fitted there.
+
+### 18. Startup cost: the supervisor was absent for its first ~8 seconds
+
+A lifecycle problem wearing perf clothes. The daemon ran the Monte-Carlo threshold
+fit (24 binary-search passes x 20k simulated sessions x a 120-step horizon)
+*before* binding its socket. During those seconds every adapter POST fails to
+connect and fails open, so a freshly started supervisor is silently not
+supervising -- the one state in which it reports healthy while doing nothing.
+Item 1's fit is seeded and deterministic, so the answer is cached in
+`$SHEPHERD_HOME/cusum_thresholds.json` and reused verbatim: a cold start pays the
+fit once, warm starts bind immediately (measured ~8s -> 0s construction time). A
+cache write failure is ignored on purpose; a cold start may be slow, it may not be
+fatal. `shepherd status` exists because the alternative was learning this from an
+empty ledger.
+
+Local judge endpoints are supported the same way: an unset
+`SHEPHERD_JUDGE_API_KEY` now means "send no Authorization header" instead of
+refusing to connect (a local gateway needs no credential, and this is where
+running a supervisor costs nothing), and loopback/LAN judge URLs bypass proxy
+environment for the same reason item 13 had to fix in the adapters.

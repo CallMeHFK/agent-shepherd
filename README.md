@@ -164,3 +164,38 @@ Interactions in this project are governed by our
 ## License
 
 MIT
+## Running the daemon
+
+```bash
+shepherd start              # foreground
+shepherd start-bg           # detached, writes ~/.shepherd/daemon.pid and daemon.log
+shepherd status             # up/down -- down means supervision is silently failing open
+shepherd stop               # SIGTERM the start-bg process
+shepherd risk               # which admission thresholds are in force, prior or calibrated
+```
+
+For a machine that should always be supervising, install the shipped systemd
+user unit (no root required). It is deliberately not enabled by the installer:
+turning on a background process that injects text into your agents is your
+decision, not a side effect of `pip install`.
+
+```bash
+install -Dm644 packaging/shepherd.service ~/.config/systemd/user/shepherd.service
+systemctl --user daemon-reload && systemctl --user enable --now shepherd
+```
+
+The first start pays the drift detector's Monte-Carlo threshold fit (a few
+seconds) before it binds; the result is cached in
+`~/.shepherd/cusum_thresholds.json`, so later starts bind immediately. While the
+daemon is down, adapters fail open -- `shepherd status` is the command that says so.
+
+## Judge backends
+
+The judge is any OpenAI-compatible chat endpoint. A local gateway needs no key
+at all -- leave `SHEPHERD_JUDGE_API_KEY` unset and no `Authorization` header is
+sent, and loopback/LAN endpoints bypass proxy environment:
+
+```bash
+export SHEPHERD_JUDGE_BASE_URL=http://127.0.0.1:19991/v1
+export SHEPHERD_JUDGE_MODEL=<name from that endpoint's /v1/models>
+```

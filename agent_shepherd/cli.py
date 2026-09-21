@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -23,8 +24,14 @@ def _parser() -> argparse.ArgumentParser:
     install.add_argument("agent", choices=["qwenpaw", "claude", "codex"])
     install.add_argument("--dry-run", action="store_true")
 
-    sub.add_parser("start", help="start the supervisor daemon")
-    sub.add_parser("stop", help="stop the supervisor daemon (placeholder)")
+    start = sub.add_parser("start", help="start the supervisor daemon in the foreground")
+    start.add_argument("--port", type=int, help="override config port (or SHEPHERD_PORT)")
+    start_bg = sub.add_parser("start-bg", help="start the daemon detached, writing a pidfile")
+    start_bg.add_argument("--port", type=int)
+    sub.add_parser("stop", help="stop a daemon started with `shepherd start-bg`")
+    sub.add_parser("status", help="report whether the daemon is up and what it has decided")
+    risk = sub.add_parser("risk", help="show the risk-controlled admission thresholds")
+    risk.add_argument("--fit-from-eval", action="store_true", help=argparse.SUPPRESS)
 
     tail = sub.add_parser("tail", help="follow the audit ledger for a session")
     tail.add_argument("agent", choices=["qwenpaw", "claude", "codex"])
@@ -55,6 +62,12 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
+def _pidfile() -> Path:
+    from .core.ledger import default_root
+
+    return default_root() / "daemon.pid"
+
+
 def _agent(name: str) -> Agent:
     return {
         "qwenpaw": Agent.QWENPAW,
@@ -69,11 +82,83 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "start":
         cfg.ensure_defaults()
+        port = getattr(args, "port", None) or os.environ.get("SHEPHERD_PORT")
+        if port:
+            cfg.port = int(port)
         daemon = create_daemon(cfg)
         try:
             daemon.serve_forever()
         except KeyboardInterrupt:
             daemon.stop()
+        return 0
+
+    if args.command == "start-bg":
+        import subprocess
+
+        cfg.ensure_defaults()
+        _pidfile().parent.mkdir(parents=True, exist_ok=True)
+        log = _pidfile().with_suffix(".log")
+        with open(log, "ab") as fh:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "agent_shepherd.cli", "start"],
+                stdout=fh,
+                stderr=fh,
+                start_new_session=True,
+                env={
+                    **dict(os.environ),
+                    # Unbuffered, or the "listening" line and any traceback sit in
+                    # the child's block-buffered stdout until it is killed and the
+                    # log file is left empty.
+                    "PYTHONUNBUFFERED": "1",
+                    **({"SHEPHERD_PORT": str(args.port)} if args.port else {}),
+                },
+            )
+        _pidfile().write_text(str(proc.pid))
+        print(f"daemon started pid={proc.pid}, log={log}")
+        return 0
+
+    if args.command == "stop":
+        import signal
+
+        path = _pidfile()
+        if not path.exists():
+            print("no pidfile: the daemon was not started with `shepherd start-bg`", file=sys.stderr)
+            return 1
+        pid = int(path.read_text().strip() or 0)
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"sent SIGTERM to {pid}")
+        except ProcessLookupError:
+            print(f"pid {pid} is not running; removed stale pidfile")
+        path.unlink(missing_ok=True)
+        return 0
+
+    if args.command == "status":
+        import httpx
+
+        url = os.environ.get("SHEPHERD_DAEMON_URL", "http://127.0.0.1:4890").rstrip("/")
+        try:
+            ok = httpx.get(f"{url}/health", timeout=2.0, trust_env=False).json().get("ok")
+            print(f"daemon {url}: {'up' if ok else 'unexpected response'}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"daemon {url}: DOWN ({type(exc).__name__}) — supervision is failing open")
+            return 1
+        return 0
+
+    if args.command == "risk":
+        from .core.judge.risk import RiskModel
+
+        model = RiskModel.load(
+            defaults={"judge": cfg.policy.nudge_threshold, "judge_block": cfg.policy.block_threshold},
+            target_fpr=cfg.policy.risk_target_fpr,
+            min_samples=cfg.policy.risk_min_samples,
+        )
+        print("source of truth: " + str(model.path))
+        for key in ("judge", "judge_block"):
+            evidence = model.samples.get(key)
+            n = (evidence.n_negative if evidence else 0) + (len(evidence.drift_scores) if evidence else 0)
+            state = "calibrated" if key in model.thresholds else f"prior (needs >= {model.min_samples} labeled)"
+            print(f"  {key}: {model.threshold_for(key):.2f}  [{state}, {n} labeled]")
         return 0
 
     if args.command == "install":

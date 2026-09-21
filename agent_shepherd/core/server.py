@@ -65,6 +65,10 @@ class SessionState:
     # (hysteresis) so a detector does not re-nag the agent with the same
     # verdict while the situation is unchanged.
     last_nudge: dict[str, float] = field(default_factory=dict)
+    # Judge confidences emitted this session, and whether Tier 0 independently
+    # confirmed drift in it. Together they give the risk model its label.
+    judge_scores: list[float] = field(default_factory=list)
+    tier0_confirmed: bool = False
     events_seen: int = 0
     judge_calls: int = 0
     judge_tokens: int = 0
@@ -137,7 +141,12 @@ class PolicyEngine:
         self.rulebook: Rulebook | None = None
         if config.policy.rulebook_enabled:
             self.rulebook = Rulebook.load(self.rulebook_path)
+        # The risk model lives beside the ledger for the same reason the rulebook
+        # does: an engine pointed at another ledger must not write into the
+        # user's config directory.
+        self.risk_path = self.ledger.root / "risk.json"
         self.risk = RiskModel.load(
+            path=self.risk_path,
             defaults={
                 "judge": config.policy.nudge_threshold,
                 "judge_block": config.policy.block_threshold,
@@ -203,7 +212,7 @@ class PolicyEngine:
         if verdict.detector != "judge":
             return self._budget(verdict)
         if verdict.action == VerdictAction.NUDGE:
-            limit = self.risk.threshold_for("judge")
+            limit = self.risk.threshold_for(f"{agent.value}:judge")
             if verdict.confidence < limit:
                 return Verdict(
                     action=VerdictAction.PASS,
@@ -215,7 +224,7 @@ class PolicyEngine:
                     detector="judge",
                 )
         if verdict.action in (VerdictAction.BLOCK, VerdictAction.ESCALATE):
-            limit = self.risk.threshold_for("judge_block")
+            limit = self.risk.threshold_for(f"{agent.value}:judge_block")
             allowed = self.config.agent_config(agent.value).block_enabled
             if verdict.confidence < limit or not allowed:
                 # Losing the authority to stop, keeping the advice.
@@ -331,6 +340,14 @@ class PolicyEngine:
         state.events_seen += 1
         key = (event.agent.value, event.session_id)
 
+        # Session end first, before anything can return early: the whole
+        # trajectory is in the ledger, which is the only place "did the agent
+        # actually follow the nudge" and "was this judge verdict needed" can be
+        # answered. A parked verdict would otherwise be drained and returned
+        # here, and the learning step would never run.
+        if event.event == EventType.STOP:
+            self._finalize_session(event, state)
+
         # Gate boundary: drain any verdict parked by an earlier inline event
         # before evaluating the gate event itself.
         if event.event in (EventType.ITERATION_END, EventType.STOP, EventType.PROMPT_SUBMIT):
@@ -356,16 +373,6 @@ class PolicyEngine:
                 )
                 return verdict
 
-        # Session end: the whole trajectory is in the ledger, which is the only
-        # place "did the agent actually follow the nudge" can be answered.
-        if event.event == EventType.STOP and self.rulebook is not None:
-            self.rulebook.observe(
-                self.ledger.iter_records(event.agent, event.session_id),
-                agent=event.agent,
-                session_id=event.session_id,
-            )
-            self.rulebook.save(self.rulebook_path)
-
         # Tier 0 first: deterministic signals are cheap and always on.
         verdict = self._run_detectors(event, history)
         if verdict is not None:
@@ -375,6 +382,7 @@ class PolicyEngine:
             if verdict.action == VerdictAction.PASS:
                 return self._silent(state, event, verdict.reason)
             self._tally(state, verdict)
+            state.tier0_confirmed = True
             self.ledger.record_verdict(
                 event.agent, event.session_id, verdict, context=self._cost(state)
             )
@@ -385,6 +393,8 @@ class PolicyEngine:
         if self._wake(event.agent, event, history):
             state.judge_calls += 1
             verdict = self._score(event, history)
+            if verdict is not None:
+                state.judge_scores.append(verdict.confidence)
             usage = getattr(self.scorer, "last_usage", None) or {}
             state.judge_tokens += int(usage.get("total_tokens") or 0)
             if verdict is not None:
@@ -407,6 +417,27 @@ class PolicyEngine:
                 return verdict
 
         return Verdict(action=VerdictAction.PASS, reason="no drift detected", confidence=0.0)
+
+    def _finalize_session(self, event: AgentEvent, state: SessionState) -> None:
+        if self.rulebook is not None:
+            self.rulebook.observe(
+                self.ledger.iter_records(event.agent, event.session_id),
+                agent=event.agent,
+                session_id=event.session_id,
+            )
+            self.rulebook.save(self.rulebook_path)
+        # The risk label is deliberately modest: "Tier 0 independently confirmed
+        # drift somewhere in this session". That makes the fitted threshold
+        # concordant with the detectors, which is not the same as correct -- it
+        # is a weak label, and `shepherd eval --judge` is where a
+        # by-construction label exists. Unconfirmed judge nudges count as false
+        # interventions, which is the failure this budget exists to bound.
+        self._label_judge_outcomes(event.agent, state)
+
+    def _label_judge_outcomes(self, agent: Agent, state: SessionState) -> None:
+        for score in state.judge_scores:
+            self.note_outcome(agent, "", "judge", score, is_drift=state.tier0_confirmed)
+        state.judge_scores.clear()
 
     def _silent(self, state: SessionState, event: AgentEvent, reason: str) -> Verdict:
         """Record a suppression so the ledger shows the hysteresis worked."""

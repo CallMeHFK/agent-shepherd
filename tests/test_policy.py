@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from agent_shepherd.core.config import JudgeConfig, PolicyConfig, ShepherdConfig
 from agent_shepherd.core.ledger import Ledger
 from agent_shepherd.core.server import PolicyEngine
@@ -532,3 +534,73 @@ def test_clean_iteration_end_no_longer_buys_a_judge_call():
         )
     )
     assert scorer.calls == calls_before + 1
+
+
+def test_risk_threshold_learns_from_session_outcomes_and_is_applied(tmp_path):
+    """The admission line must move once evidence accumulates, and the per-agent
+    key it is stored under must be the same one the gate reads.
+
+    Before this, `note_outcome` had no caller at all: the thresholds were
+    calibrated-looking but permanently equal to the configured prior.
+    """
+    from agent_shepherd.core.types import ToolCall, Verdict
+
+    def build():
+        policy = PolicyConfig(review_clean_iterations=True)  # wake the reviewer on evidence
+        cfg = ShepherdConfig(judge=JudgeConfig(), policy=policy, agents={})
+        engine = PolicyEngine(cfg, Ledger(root=tmp_path))
+        engine.scorer = FakeScorer(
+            Verdict(
+                action=VerdictAction.NUDGE,
+                reason="drift",
+                guidance="fix it",
+                confidence=0.7,
+                detector="judge",
+            )
+        )
+        return engine
+
+    engine = build()
+    assert engine.risk.threshold_for("claude:judge") == 0.60  # the prior
+
+    # Twenty clean sessions where only the judge cried wolf: label is_drift False.
+    for i in range(20):
+        sid = f"fit{i}"
+        engine.process(
+            AgentEvent(
+                agent=Agent.CLAUDE,
+                session_id=sid,
+                event=EventType.ITERATION_END,
+                ts=time.time() + i,
+                tool=ToolCall(name="shell", input={"cmd": "true"}),
+            )
+        )
+        engine.process(AgentEvent(agent=Agent.CLAUDE, session_id=sid, event=EventType.STOP, ts=time.time() + i))
+
+    fitted = engine.risk.threshold_for("claude:judge")
+    assert fitted > 0.7, f"a judge that was wrong 20 times should raise its own bar, got {fitted}"
+    assert (tmp_path / "risk.json").exists(), "the fitted value is persisted next to the ledger"
+
+    # And a fresh engine reading that file now rejects the same 0.7 verdict.
+    reopened = build()
+    assert reopened.risk.threshold_for("claude:judge") == pytest.approx(fitted)
+    verdict = reopened.process(
+        AgentEvent(
+            agent=Agent.CLAUDE,
+            session_id="after",
+            event=EventType.ITERATION_END,
+            ts=time.time(),
+            tool=ToolCall(name="shell", input={"cmd": "true"}),
+        )
+    )
+    assert verdict.action == VerdictAction.PASS
+    assert "admission" in verdict.reason
+
+
+def test_risk_prior_is_used_for_an_agent_with_no_history(tmp_path):
+    """A per-agent key with no evidence must fall back to the configured prior,
+    not to 1.0 -- which would silently veto every verdict for a new agent."""
+    cfg = ShepherdConfig(judge=JudgeConfig(), policy=PolicyConfig(), agents={})
+    engine = PolicyEngine(cfg, Ledger(root=tmp_path))
+    assert engine.risk.threshold_for("codex:judge") == 0.60
+    assert engine.risk.threshold_for("codex:judge_block") == 0.85

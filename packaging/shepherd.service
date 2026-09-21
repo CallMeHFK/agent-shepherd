@@ -1,0 +1,22 @@
+[Unit]
+Description=agent-shepherd supervisor daemon
+Documentation=https://github.com/CallMeHFK/agent-shepherd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adapt the paths to your checkout and interpreter.
+ExecStart=%h/develop/agent-shepherd/.venv/bin/python -m agent_shepherd.cli start
+WorkingDirectory=%h/develop/agent-shepherd
+Environment=PYTHONUNBUFFERED=1
+# The judge backend and its key live here; the unit reads no secrets itself.
+# Environment=SHEPHERD_JUDGE_BASE_URL=http://127.0.0.1:19991/v1
+# Environment=SHEPHERD_JUDGE_MODEL=...
+# Environment=SHEPHERD_JUDGE_API_KEY=...
+Restart=on-failure
+RestartSec=2
+Nice=10
+
+[Install]
+WantedBy=default.target

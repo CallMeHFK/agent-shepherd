@@ -23,6 +23,7 @@ cost the agent pays.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -89,7 +90,10 @@ def calibrate(
             threshold = current
             break
         current += step
-    return round(threshold, 4)
+    # Round *up*. Rounding to nearest can drop the threshold below the grid
+    # point that satisfied the budget, and a risk bound that is violated by the
+    # last decimal is not a bound.
+    return math.ceil(threshold * 10000) / 10000
 
 
 @dataclass
@@ -104,8 +108,18 @@ class RiskModel:
     path: Path | None = None
 
     @classmethod
-    def load(cls, defaults: dict[str, float], target_fpr: float, min_samples: int = 20) -> RiskModel:
-        path = _home() / "risk.json"
+    def load(
+        cls,
+        defaults: dict[str, float],
+        target_fpr: float,
+        min_samples: int = 20,
+        *,
+        path: Path | str | None = None,
+    ) -> RiskModel:
+        # Callers that own a ledger should keep the model beside it, so an
+        # engine pointed at a temp or alternate ledger never writes into the
+        # user's real config directory.
+        path = Path(path) if path else _home() / "risk.json"
         model = cls(target_fpr=target_fpr, min_samples=min_samples, defaults=dict(defaults), path=path)
         if path.exists():
             try:
@@ -120,11 +134,23 @@ class RiskModel:
                 model.samples[key] = cs
         return model
 
+    def prior_for(self, key: str) -> float:
+        """The configured prior that stands in until evidence says otherwise."""
+        base = key.split(":")[-1]
+        return self.defaults.get(base, self.defaults.get(key, 1.0))
+
     def threshold_for(self, key: str) -> float:
-        """Calibrated threshold for ``key``; the configured default until enough data."""
+        """Calibrated threshold for ``key``, else the configured prior.
+
+        Keys are per-agent (``claude:judge``) because agents differ in how flaky
+        their environment is, but the *priors* in config are global, so the
+        fallback strips the agent prefix. Without that a per-agent key with no
+        fitted value would fall back to 1.0 and silently veto every judge
+        verdict.
+        """
         if key in self.thresholds:
             return self.thresholds[key]
-        return self.defaults.get(key, 1.0)
+        return self.prior_for(key)
 
     def observe(self, key: str, score: float, is_drift: bool) -> None:
         samples = self.samples.setdefault(key, CalibrationSet())
@@ -135,9 +161,19 @@ class RiskModel:
                 del bucket[: len(bucket) - 2000]
 
     def refit(self, key: str) -> float:
+        """Fit and remember a threshold, or leave the key unfitted.
+
+        Storing a value when the evidence is too thin is its own bug: the fit
+        returns the fallback, `threshold_for` then treats it as calibrated, and
+        a per-agent key whose prior lives under the base name silently pins the
+        gate at 1.0 -- vetoing every judge verdict for a new agent.
+        """
         samples = self.samples.get(key) or CalibrationSet()
-        fallback = self.defaults.get(key, 1.0)
-        self.thresholds[key] = calibrate(samples, self.target_fpr, fallback, self.min_samples)
+        prior = self.prior_for(key)
+        if samples.n_negative < self.min_samples:
+            self.thresholds.pop(key, None)
+            return prior
+        self.thresholds[key] = calibrate(samples, self.target_fpr, prior, self.min_samples)
         return self.thresholds[key]
 
     def save(self) -> None:

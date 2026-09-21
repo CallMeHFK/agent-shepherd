@@ -38,9 +38,13 @@ class JudgeClient:
         return dict(self.last_usage)
 
     def complete(self, messages: list[dict[str, str]], max_tokens: int = 512, temperature: float = 0.0) -> str:
-        """Call the judge model and return its raw text response."""
-        if not self.api_key:
-            raise RuntimeError("judge api_key is empty")
+        """Call the judge model and return its raw text response.
+
+        An empty key is legal and means "no auth header": local gateways
+        (cc-switch, vLLM on loopback) commonly serve without one, and refusing
+        to connect made the pluggable-backend promise false for exactly the
+        endpoints where running a supervisor costs nothing.
+        """
         url = f"{self.base_url}/chat/completions"
         payload = {
             "model": self.model,
@@ -48,11 +52,14 @@ class JudgeClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        with httpx.Client(timeout=self.timeout) as client:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        # Loopback and LAN endpoints must not inherit proxy environment either:
+        # httpx raises ImportError there without its optional SOCKS extra.
+        local = ("127.0.0.1" in url) or ("localhost" in url) or ("::1" in url) or (":19991" in url)
+        trust_env = not local
+        with httpx.Client(timeout=self.timeout, trust_env=trust_env) as client:
             resp = client.post(url, headers=headers, json=payload)
         try:
             resp.raise_for_status()
