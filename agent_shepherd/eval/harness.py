@@ -40,10 +40,20 @@ CHARS_PER_TOKEN = 4
 DEFAULT_TOLERANCE = 8
 
 
-def default_config() -> ShepherdConfig:
-    """In-memory config: benchmark defaults, and never reads ``~/.shepherd``."""
+def default_config(*, live_judge: bool = False) -> ShepherdConfig:
+    """In-memory config: benchmark defaults, and never reads ``~/.shepherd``.
+
+    ``live_judge=True`` (what ``--judge`` passes) is the one exception, and only
+    for the judge block. Hermetic-by-default is right for the offline Tier-0
+    benchmark: it must score the same way on CI and on a laptop. But a run that
+    was *told* to consult a real reviewer has to use the endpoint the operator
+    configured -- otherwise it dials the packaged default, gets rejected, and
+    reports "no judge verdicts", which is indistinguishable from a supervisor that
+    never saw a problem.
+    """
+    judge = ShepherdConfig.load().judge if live_judge else JudgeConfig(api_key="")
     return ShepherdConfig(
-        judge=JudgeConfig(api_key=""),
+        judge=judge,
         # The rulebook is cross-session memory; leaving it on would let the
         # benchmark learn from the cases it has already replayed and break the
         # independence of every case after it.
@@ -304,7 +314,7 @@ def run_benchmark(
     ``cases`` it was computed from, so a surprising number can always be traced
     back to the session that produced it.
     """
-    cfg = config or default_config()
+    cfg = config or default_config(live_judge=not detectors_only)
     chosen = faults or scenarios.fault_kinds()
     root = tempfile.mkdtemp(prefix="shepherd-eval-")
     previous_home = os.environ.get("SHEPHERD_HOME")
@@ -407,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
         "--fit-risk",
         metavar="OUT",
         nargs="?",
-        const="",
+        const="all",
         default=None,
         help="fit admission thresholds from the corpus labels and write risk.json "
         "(default $SHEPHERD_HOME/risk.json, or OUT if given); needs --judge",
@@ -425,6 +435,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyError as exc:
         print(f"shepherd eval: {exc}", file=sys.stderr)
         return 2
+    if args.judge:
+        cfg_used = default_config(live_judge=True).judge
+        print(
+            f"judge: {cfg_used.base_url} model={cfg_used.model} "
+            f"key={'set' if cfg_used.api_key else 'none'} (from ~/.shepherd/config.yaml)"
+        )
     print(format_table(report))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
@@ -433,7 +449,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.fit_risk is not None:
         from ..core.ledger import default_root
 
-        out = Path(args.fit_risk) if args.fit_risk else default_root() / "risk.json"
+        # `all` is the literal, not a glob: the daemon reads $SHEPHERD_HOME/risk.json
+        # and an operator should be able to target it without spelling a path.
+        target = (default_root() / "risk.json") if args.fit_risk in ("", None, "all") else Path(args.fit_risk)
+        out = target
         fitted = fit_risk_from_report(report, out_path=out)
         if not fitted.get("fitted") and fitted.get("threshold") is None:
             print(f"--fit-risk: {fitted.get('reason', 'nothing to fit')}", file=sys.stderr)

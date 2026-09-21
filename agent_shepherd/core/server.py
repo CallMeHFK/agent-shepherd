@@ -220,7 +220,10 @@ class PolicyEngine:
                         f"judge nudge below risk-controlled admission line "
                         f"(confidence {verdict.confidence:.2f} < {limit:.2f})"
                     ),
-                    confidence=0.0,
+                    # Keep the score. A withheld verdict is still an observation
+                    # of what the judge believed, and the threshold is fitted from
+                    # the scores that were *rejected*.
+                    confidence=verdict.confidence,
                     detector="judge",
                 )
         if verdict.action in (VerdictAction.BLOCK, VerdictAction.ESCALATE):
@@ -313,7 +316,16 @@ class PolicyEngine:
             return self.scorer.score(event, history)
         except Exception as exc:  # noqa: BLE001 - fail open, never wedge the agent
             if self.config.policy.fail_open:
-                return None
+                # Silent is the right answer for the agent and the wrong one for
+                # the operator: a misconfigured endpoint looked identical to a
+                # healthy session that simply had nothing to say. Attribute the
+                # failure so the ledger, `shepherd eval` and the report can see it.
+                return Verdict(
+                    action=VerdictAction.PASS,
+                    reason=f"judge unavailable: {type(exc).__name__}: {str(exc)[:180]}",
+                    confidence=0.0,
+                    detector="judge",
+                )
             return Verdict(
                 action=VerdictAction.ESCALATE,
                 reason=f"judge failed: {exc}",
@@ -377,7 +389,9 @@ class PolicyEngine:
         verdict = self._run_detectors(event, history)
         if verdict is not None:
             if self._admit(state, event, verdict) is None:
-                return self._silent(state, event, f"{verdict.detector} nudge suppressed (cooldown)")
+                return self._silent(
+                    state, event, f"{verdict.detector} nudge suppressed (cooldown)", origin=verdict
+                )
             verdict = self._control(event.agent, verdict)
             if verdict.action == VerdictAction.PASS:
                 return self._silent(state, event, verdict.reason)
@@ -399,7 +413,7 @@ class PolicyEngine:
             state.judge_tokens += int(usage.get("total_tokens") or 0)
             if verdict is not None:
                 if self._admit(state, event, verdict) is None:
-                    return self._silent(state, event, "judge nudge suppressed (cooldown)")
+                    return self._silent(state, event, "judge nudge suppressed (cooldown)", origin=verdict)
                 verdict = self._control(event.agent, verdict)
                 if verdict.action == VerdictAction.PASS:
                     self.ledger.record_verdict(
@@ -439,10 +453,22 @@ class PolicyEngine:
             self.note_outcome(agent, "", "judge", score, is_drift=state.tier0_confirmed)
         state.judge_scores.clear()
 
-    def _silent(self, state: SessionState, event: AgentEvent, reason: str) -> Verdict:
-        """Record a suppression so the ledger shows the hysteresis worked."""
+    def _silent(
+        self, state: SessionState, event: AgentEvent, reason: str, origin: Verdict | None = None
+    ) -> Verdict:
+        """Record a suppression so the ledger shows the hysteresis worked.
+
+        ``origin`` keeps whose verdict was silenced. Dropping it made a silenced
+        judge verdict indistinguishable from "no detector fired", so a corpus
+        could never see the negative class the false-alarm budget is fitted from.
+        """
         state.suppressed += 1
-        verdict = Verdict(action=VerdictAction.PASS, reason=reason, confidence=0.0)
+        verdict = Verdict(
+            action=VerdictAction.PASS,
+            reason=reason,
+            confidence=origin.confidence if origin else 0.0,
+            detector=origin.detector if origin else None,
+        )
         self.ledger.record_verdict(event.agent, event.session_id, verdict, context=self._cost(state))
         return verdict
 

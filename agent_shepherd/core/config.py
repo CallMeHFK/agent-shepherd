@@ -19,11 +19,27 @@ or from the shell snapshots of the agent being supervised.
 from __future__ import annotations
 
 import os
+import re
+import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+_ENV_REF = re.compile(r"\$\{(\w+)\}")
+
+
+def expand_env(value: str) -> str:
+    """Resolve ``${VAR}`` references written into the config file.
+
+    The starter config ships ``api_key: ${SHEPHERD_JUDGE_API_KEY}`` as a literal
+    string. Without expansion that text is sent as the bearer token -- which also
+    defeats "no key means no auth header", because the value is not empty -- so an
+    unset variable resolves to empty, meaning unconfigured, everywhere.
+    """
+    return _ENV_REF.sub(lambda m: os.environ.get(m.group(1), ""), value or "")
 
 
 @dataclass
@@ -40,10 +56,10 @@ class JudgeConfig:
     def from_dict(cls, data: dict[str, Any] | None) -> JudgeConfig:
         data = data or {}
         cfg = cls(
-            backend=str(data.get("backend", "agnes")),
-            base_url=str(data.get("base_url", "https://apihub.agnes-ai.com/v1")),
-            model=str(data.get("model", "agnes-3.0-flash")),
-            api_key=str(data.get("api_key", "")),
+            backend=expand_env(str(data.get("backend", "agnes"))),
+            base_url=expand_env(str(data.get("base_url", "https://apihub.agnes-ai.com/v1"))),
+            model=expand_env(str(data.get("model", "agnes-3.0-flash"))),
+            api_key=expand_env(str(data.get("api_key", ""))),
             timeout=float(data.get("timeout", 30.0)),
         )
         # Env vars override the file. This lets a user keep the config file
@@ -261,3 +277,126 @@ class ShepherdConfig:
         }
         with open(path, "w", encoding="utf-8") as fh:
             yaml.safe_dump(starter, fh, sort_keys=False, allow_unicode=True)
+
+# Env vars that override judge settings, in the same precedence order the loader
+# uses. Kept next to the code that reads them so the two cannot drift apart.
+JUDGE_ENV = {
+    "backend": "SHEPHERD_JUDGE_BACKEND",
+    "base_url": "SHEPHERD_JUDGE_BASE_URL",
+    "model": "SHEPHERD_JUDGE_MODEL",
+    "api_key": "SHEPHERD_JUDGE_API_KEY",
+    "timeout": "SHEPHERD_JUDGE_TIMEOUT",
+}
+
+SECRET_FIELDS = {"api_key"}
+
+
+def _defaults(obj: object) -> dict:
+    from dataclasses import fields
+
+    return {f.name: getattr(obj, f.name) for f in fields(obj)}
+
+
+def effective_settings(path: Path | str | None = None) -> list[dict]:
+    """Every setting the daemon will use, and where that value came from.
+
+    A supervisor configured across a YAML file, five environment variables and
+    dataclass defaults is not inspectable by reading any one of them, and
+    "is the model set?" turns into guessing. This answers it per key: `file`,
+    `env:NAME` or `default`.
+    """
+    path = Path(path) if path else Path.home() / ".shepherd" / "config.yaml"
+    raw: dict = {}
+    if path.exists():
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            raw = loaded if isinstance(loaded, dict) else {}
+        except (OSError, yaml.YAMLError):
+            raw = {}
+    file_policy = raw.get("policy") or {}
+    file_judge = raw.get("judge") or {}
+    rows: list[dict] = []
+
+    def add(section: str, name: str, value: object, default: object, env: str | None, in_file: bool) -> None:
+        source = f"env:{env}" if env and os.environ.get(env) else ("file" if in_file else "default")
+        shown = "***" if name in SECRET_FIELDS and value else ("<unset>" if not value else value)
+        rows.append({"key": f"{section}.{name}", "value": shown, "source": source, "default": default})
+
+    jd = JudgeConfig.from_dict(raw.get("judge"))
+    jd_default = JudgeConfig()
+    for name, value in _defaults(jd).items():
+        add("judge", name, value, _defaults(jd_default)[name], JUDGE_ENV.get(name), name in file_judge)
+
+    pd = PolicyConfig.from_dict(raw.get("policy"))
+    pd_default = PolicyConfig()
+    for name, value in _defaults(pd).items():
+        add("policy", name, value, _defaults(pd_default)[name], None, name in file_policy)
+
+    add("root", "port", int(raw.get("port", 4890)), 4890, None, "port" in raw)
+    for agent, opts in sorted((raw.get("agents") or {}).items()):
+        cfg = AgentConfig.from_dict(opts)
+        add("agents", f"{agent}.enabled", cfg.enabled, True, None, True)
+        add("agents", f"{agent}.block_enabled", cfg.block_enabled, False, None, True)
+    return rows
+
+
+def stale_keys(path: Path | str | None = None) -> list[str]:
+    """Keys present in the file that no longer configure anything.
+
+    Without this, a retired key sits in a config file looking like a live
+    setting, and someone wastes time tuning it.
+    """
+    path = Path(path) if path else Path.home() / ".shepherd" / "config.yaml"
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return []
+    out: list[str] = []
+    for section, keys in (("policy", raw.get("policy")), ("judge", raw.get("judge"))):
+        allowed = {f.name for f in fields_of(PolicyConfig if section == "policy" else JudgeConfig)}
+        for key in (keys or {}):
+            if key not in allowed:
+                out.append(f"{section}.{key}")
+    return sorted(out)
+
+
+def fields_of(cls):
+    from dataclasses import fields
+
+    return fields(cls)
+
+
+def merge_missing_keys(path: Path | str | None = None, *, dry_run: bool = False) -> tuple[list[str], Path | None]:
+    """Add any setting the file does not mention, keeping the user's values.
+
+    `ensure_defaults` used to write a starter only when the file was absent, so a
+    config written for an older release never learned about a new control and no
+    command said so. Existing keys are left byte-for-byte alone and the previous
+    file is backed up first.
+    """
+    path = Path(path) if path else Path.home() / ".shepherd" / "config.yaml"
+    if not path.exists():
+        return [], None
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    added: list[str] = []
+    sections = {
+        "policy": {k: v for k, v in _defaults(PolicyConfig()).items()},
+        "judge": {k: v for k, v in _defaults(JudgeConfig()).items() if k != "api_key"},
+    }
+    for section, defaults in sections.items():
+        block = raw.setdefault(section, {})
+        if not isinstance(block, dict):
+            continue
+        for key, value in defaults.items():
+            if key not in block:
+                block[key] = value
+                added.append(f"{section}.{key}")
+    if added and not dry_run:
+        # Local copy of the adapters' safety helper: core must not import from
+        # adapters.
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        aside = path.with_name(f"{path.name}.bak-{stamp}")
+        shutil.copy2(path, aside)
+        print(f"previous config preserved at {aside}")
+        path.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    return added, path

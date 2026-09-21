@@ -45,6 +45,16 @@ def _parser() -> argparse.ArgumentParser:
     stats.add_argument("agent", choices=["qwenpaw", "claude", "codex"])
     stats.add_argument("session_id")
 
+    cfgcmd = sub.add_parser("config", help="show and edit ~/.shepherd/config.yaml")
+    cfgsub = cfgcmd.add_subparsers(dest="subcommand", required=True)
+    cfgsub.add_parser("show", help="every effective setting and where it came from")
+    setter = cfgsub.add_parser("set", help="set one setting, e.g. judge.model step-3")
+    setter.add_argument("key")
+    setter.add_argument("value")
+    cfgsub.add_parser("merge", help="add settings this file predates, keeping your values")
+    cfgsub.add_parser("judge", help="list model names the configured judge endpoint accepts")
+
+    sub.add_parser("doctor", help="what is configured, what is missing, what to do next")
     ev = sub.add_parser(
         "eval",
         help="run the offline counterfactual benchmark (fault injection with known onsets)",
@@ -53,6 +63,15 @@ def _parser() -> argparse.ArgumentParser:
     ev.add_argument("--sessions", type=int, default=8, help="sessions per fault kind")
     ev.add_argument("--steps", type=int, default=60, help="events per session")
     ev.add_argument("--json", dest="json_out", help="write the full report to this path")
+    ev.add_argument("--fault", action="append", help="only run these faults (repeatable)")
+    ev.add_argument("--judge", action="store_true", help="enable Tier 1 (needs a reachable judge)")
+    ev.add_argument(
+        "--fit-risk",
+        metavar="OUT",
+        default=None,
+        help="fit admission thresholds from the corpus labels into OUT "
+        "(use `all` for the file the daemon reads)",
+    )
     ev.add_argument(
         "--fail-under-f1",
         type=float,
@@ -246,6 +265,156 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "config":
+        from .core import config as cfgmod
+
+        path = args.config or (Path.home() / ".shepherd" / "config.yaml")
+        if args.subcommand == "show":
+            print(f"config file: {path}  ({'exists' if Path(path).exists() else 'absent — defaults only'})")
+            print(f"{'key':38s} {'value':22s} source")
+            for row in cfgmod.effective_settings(path):
+                print(f"{row['key']:38s} {str(row['value'])[:22]:22s} {row['source']}")
+            stale = cfgmod.stale_keys(path)
+            if stale:
+                print("\nSTALE keys in the file (they configure nothing any more): " + ", ".join(stale))
+                print("run `shepherd config merge` to add settings the file predates.")
+            return 0
+
+        if args.subcommand == "merge":
+            added, written = cfgmod.merge_missing_keys(path)
+            print(f"added {len(added)} setting(s): " + (", ".join(added) if added else "none — file is current"))
+            if written:
+                print(f"wrote {written}")
+            return 0
+
+        if args.subcommand == "set":
+            import yaml
+
+            key, value = args.key, args.value
+            if "." not in key:
+                print("usage: shepherd config set <section>.<key> <value>", file=sys.stderr)
+                return 2
+            section, name = key.split(".", 1)
+            data = {}
+            if Path(path).exists():
+                data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+            try:
+                parsed = yaml.safe_load(value)
+            except yaml.YAMLError:
+                parsed = value
+            if section == "agents" and "." in name:
+                agent, opt = name.split(".", 1)
+                data.setdefault("agents", {}).setdefault(agent, {})[opt] = parsed
+            else:
+                data.setdefault(section, {})[name] = parsed
+            from .adapters.backup import (
+                write_json,  # noqa: F401  (backup helper lives with adapters)
+            )
+
+            saved = None
+            if Path(path).exists():
+
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                saved = Path(path).with_name(f"{Path(path).name}.bak-{stamp}")
+                import shutil
+
+                shutil.copy2(path, saved)
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+            print(f"set {key} = {parsed!r} in {path}")
+            if saved:
+                print(f"previous config preserved at {saved}")
+            return 0
+
+        if args.subcommand == "judge":
+            import httpx
+
+            url = cfg.judge.base_url.rstrip("/")
+            try:
+                resp = httpx.get(f"{url}/models", timeout=8.0, trust_env=False)
+                resp.raise_for_status()
+                payload = resp.json()
+            except Exception as exc:  # noqa: BLE001
+                print(f"cannot reach {url}/models: {type(exc).__name__}: {exc}", file=sys.stderr)
+                return 1
+            models = payload.get("data") or payload.get("models") or []
+            names = []
+            for entry in models:
+                for field in ("id", "name", "model", "display_name"):
+                    if isinstance(entry, dict) and entry.get(field):
+                        names.append(str(entry[field]))
+                        break
+            print(f"{url} accepts {len(names)} model name(s):")
+            for n in names[:25]:
+                print(f"  {n}")
+            if names:
+                print(f"\nset one with:  shepherd config set judge.model '{names[0]}'")
+            return 0
+
+    if args.command == "doctor":
+        from .core import config as cfgmod
+
+        path = args.config or (Path.home() / ".shepherd" / "config.yaml")
+        problems = 0
+        print(f"code        {Path(__file__).resolve().parent}")
+        print(f"config file {path} {'(exists)' if Path(path).exists() else '(ABSENT — running on defaults)'}")
+        stale = cfgmod.stale_keys(path)
+        if stale:
+            problems += 1
+            print(f"STALE keys   {', '.join(stale)} -> run `shepherd config merge`")
+        if not cfg.judge.model:
+            problems += 1
+            print("judge.model  UNSET -> `shepherd config judge` lists accepted names")
+        print(
+            f"judge        {cfg.judge.base_url} model={cfg.judge.model or '<unset>'} "
+            f"key={'set' if cfg.judge.api_key else 'none (no auth header will be sent)'}"
+        )
+        if True:  # loopback endpoints can be up and misconfigured too
+            import httpx
+
+            try:
+                httpx.get(f"{cfg.judge.base_url.rstrip('/')}/models", timeout=6.0, trust_env=False).raise_for_status()
+                print("judge reachability  ok")
+            except Exception as exc:  # noqa: BLE001
+                problems += 1
+                print(f"judge reachability  FAIL ({type(exc).__name__}) -> Tier 1 stays asleep, Tier 0 still runs")
+        url = os.environ.get("SHEPHERD_DAEMON_URL", f"http://127.0.0.1:{cfg.port}").rstrip("/")
+        import httpx
+
+        try:
+            httpx.get(f"{url}/health", timeout=3.0, trust_env=False).raise_for_status()
+            print(f"daemon       up on {url}")
+        except Exception:  # noqa: BLE001
+            problems += 1
+            print(f"daemon       DOWN on {url} -> `systemctl --user enable --now shepherd` or `shepherd start-bg`")
+        for agent in ("claude", "codex", "qwenpaw"):
+            installed = {
+                "claude": Path.home() / ".claude" / "settings.json",
+                "codex": Path.home() / ".codex" / "hooks.json",
+                "qwenpaw": Path.home() / ".qwenpaw" / "plugins" / "agent-shepherd",
+            }[agent]
+            marker = installed.exists() and (
+                "shepherd" in installed.read_text(encoding="utf-8", errors="ignore")
+                if installed.is_file()
+                else True
+            )
+            note = ""
+            if not marker and agent == "claude":
+                note = "  (a provider switcher may own this file; re-run `shepherd install claude` after switching)"
+            print(f"adapter {agent:8s} {'installed' if marker else 'NOT installed'} -> {installed}{note}")
+            problems += 0 if marker else 1
+        from .core.judge.risk import RiskModel
+
+        model = RiskModel.load(
+            {"judge": cfg.policy.nudge_threshold, "judge_block": cfg.policy.block_threshold},
+            target_fpr=cfg.policy.risk_target_fpr,
+        )
+        for key in ("judge", "judge_block"):
+            n = len(model.samples.get(key).clean_scores if model.samples.get(key) else [])
+            print(f"threshold {key:12s} {model.threshold_for(key):.2f} [{'calibrated' if key in model.thresholds else 'prior'}, {n} clean labels]")
+        print(f"\n{problems} thing(s) needing attention." if problems else "\nnothing outstanding.")
+        return 0
+
     if args.command == "eval":
         from .eval.harness import main as eval_main
 
@@ -258,6 +427,9 @@ def main(argv: list[str] | None = None) -> int:
                 "--steps",
                 str(args.steps),
                 *(["--json", args.json_out] if args.json_out else []),
+                *[x for f in (args.fault or []) for x in ("--fault", f)],
+                *(["--judge"] if args.judge else []),
+                *(["--fit-risk", args.fit_risk] if args.fit_risk else []),
                 *(["--fail-under-f1", str(args.fail_under_f1)] if args.fail_under_f1 else []),
             ]
         )
