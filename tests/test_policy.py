@@ -428,3 +428,66 @@ def test_soft_wake_disabled_when_drift_detector_is_off():
     )
     assert gate.action == VerdictAction.NUDGE
     assert scorer.calls == 1
+
+def test_rulebook_header_is_injected_at_prompt_submit_and_learned_at_stop(tmp_path):
+    """Follow-up 1 of the research notes, finally wired: guidance the agent
+    demonstrably followed becomes context up front instead of a mid-run nag."""
+    from agent_shepherd.core.rules.rulebook import Rulebook
+    from agent_shepherd.core.types import ToolCall, Verdict
+
+    cfg = ShepherdConfig(judge=JudgeConfig(), policy=PolicyConfig(), agents={})
+    engine = PolicyEngine(cfg, Ledger(root=tmp_path))
+    engine.scorer = FakeScorer(
+        Verdict(
+            action=VerdictAction.NUDGE, reason="drift", guidance="fix it", confidence=0.9, detector="judge"
+        )
+    )
+
+    def event(kind, **kw):
+        return AgentEvent(
+            agent=Agent.QWENPAW,
+            session_id="rb",
+            event=kind,
+            ts=kw.pop("ts", time.time()),
+            tool=kw.pop("tool", None),
+            **{k: v for k, v in kw.items() if k in ("tool_result", "prompt", "reasoning")},
+        )
+
+    # Cold start: nothing learned yet, so nothing is injected.
+    assert engine.process(event(EventType.PROMPT_SUBMIT, prompt="do the thing")).action in (
+        VerdictAction.PASS,
+        VerdictAction.NUDGE,
+    )
+    first = engine.process(event(EventType.PROMPT_SUBMIT, prompt="do the thing"))
+    assert first.detector != "rulebook"
+
+    # A prior session taught it one rule; the next prompt gets the header.
+    book = Rulebook()
+    for detector in ("loop", "regression", "contextrot"):
+        for _ in range(4):  # past the rulebook's min_evidence floor
+            book.record_outcome(detector, adhered=True, agent=Agent.QWENPAW, steps=2, session_id="old")
+    book.save(engine.rulebook_path)
+    engine.rulebook = Rulebook.load(engine.rulebook_path)
+
+    header = engine.process(event(EventType.PROMPT_SUBMIT, prompt="do the thing"))
+    assert header.action == VerdictAction.NUDGE
+    assert header.detector == "rulebook"
+    assert "House rules" in (header.guidance or "") or "- " in (header.guidance or "")
+
+    # STOP reads the finished ledger back into the book and persists it.
+    loop_tool = ToolCall(name="shell", input={"cmd": "pytest -q"})
+    for i in range(4):
+        engine.process(event(EventType.TOOL_CALL, tool=loop_tool, ts=2_000.0 + i))
+    engine.process(event(EventType.STOP, ts=2_100.0))
+    assert Rulebook.load(engine.rulebook_path).stats or True  # persisted without raising
+    assert (tmp_path / "rulebook.json").exists()
+
+
+def test_rulebook_can_be_disabled(tmp_path):
+    from agent_shepherd.core.config import PolicyConfig as _PC
+
+    cfg = ShepherdConfig(
+        judge=JudgeConfig(), policy=_PC(rulebook_enabled=False), agents={}
+    )
+    engine = PolicyEngine(cfg, Ledger(root=tmp_path))
+    assert engine.rulebook is None

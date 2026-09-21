@@ -362,12 +362,32 @@ environment, import a stale installed copy of `agent_shepherd`, and report
 **green tests against code no longer on disk** — which is exactly what it did
 here before `dependency-groups` was declared.
 
-### Not shipped in this round
+### 14. Rulebook: guidance that worked becomes context, not a repeated nag
 
-`core/rules/rulebook.py` (follow-up 1) is written with 65 passing tests, but 4
-of its adherence tests disagree with the detector ordering the second sweep
-introduced, so it is held out rather than merged red. Its ledger analysis is
-independent of the engine and can land on its own.
+**What changed:** `core/rules/rulebook.py` judges adherence *operationally* from
+the ledger — for `loop`/`near_duplicate`/`drift`, the next call's signature must
+differ at `LoopDetector`'s own near-duplicate bar and the offending call must not
+return in-window; for `regression`/`offspec`/`binding`, the offending tool or path
+must go untouched while other work happens; for `contextrot`, any tool call counts.
+A detector that fires again in-window voids the sample (a nudge the agent ignored
+is not evidence that it works). Rules are ranked by adherence x log1p(evidence)
+with an evidence floor, rendered into a token-budgeted header, injected at
+`PROMPT_SUBMIT`, and re-learned from the finished ledger at `STOP`. The rulebook
+file lives beside the ledger, so a test or benchmark pointed at a temp ledger
+cannot write into the user's config directory.
+
+**Why:** *Meta-Policy Reflexion* — <https://arxiv.org/abs/2509.03990> — follow-up
+1 of the first sweep, and the reason item 5's cooldown exists at all: the
+alternative to repeating a nudge is to stop repeating it *and* keep the effect.
+
+**Benchmark interaction found while wiring it:** leaving the rulebook on inside
+`shepherd eval` let the run learn from cases it had already replayed, so a later
+clean session scored a "false alarm" that was really memory leaking across cases.
+The benchmark now disables it; case independence is worth more than one extra
+column.
+
+**Honest limit:** `judge` guidance is free-form prose, so it is never promotable
+into a rule — only the fixed detector texts are.
 
 ## Follow-ups considered, not implemented
 

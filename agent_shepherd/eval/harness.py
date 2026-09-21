@@ -43,7 +43,10 @@ def default_config() -> ShepherdConfig:
     """In-memory config: benchmark defaults, and never reads ``~/.shepherd``."""
     return ShepherdConfig(
         judge=JudgeConfig(api_key=""),
-        policy=PolicyConfig(),
+        # The rulebook is cross-session memory; leaving it on would let the
+        # benchmark learn from the cases it has already replayed and break the
+        # independence of every case after it.
+        policy=PolicyConfig(rulebook_enabled=False),
         agents={},
     )
 
@@ -84,26 +87,39 @@ def _event(kind: EventType, *, tool: ToolCall | None = None, result: str | None 
 def _contract_scope() -> bool:
     """Can the contract check see an out-of-scope edit when the prompt is not on
     the same event? Real adapters only send the prompt at ``UserPromptSubmit``,
-    so a detector that needs it on the tool call is dead in production."""
+    so a detector that needs it on the tool call is dead in production.
+
+    The history holds one *in-contract* read, so the probe cannot be satisfied
+    by a detector that simply flags every edit whatsoever.
+    """
+    seen = _event(EventType.TOOL_RESULT, tool=ToolCall(name="read_file", input={"path": "core/server.py"}))
     edit = _event(EventType.TOOL_CALL, tool=ToolCall(name="edit_file", input={"path": "deploy/prod.sh"}))
-    return OffSpecDetector().evaluate(edit, []) is not None
+    return OffSpecDetector().evaluate(edit, [seen]) is not None
 
 
 def _unobservable_alarm() -> bool:
     """Can the drift alarm be reached at all by a run of *lost* tool responses?
 
-    Probed on a clean prefix — the shape the benchmark injects — because the
-    statistic's own baseline would otherwise mask the answer.
+    Probed in the shape the benchmark injects — a healthy prefix, then calls
+    whose results never arrive, each call followed by its result — because the
+    statistic's own baseline and the interleaved non-result steps both decide
+    the answer.
     """
     detector = CUSUMDriftDetector(target_fpr=0.05)
+    shell = ToolCall(name="shell")
+    reader = ToolCall(name="read_file", input={"path": "session.jsonl"})
     history: list[AgentEvent] = []
-    probe = _event(EventType.TOOL_RESULT, tool=ToolCall(name="shell"), result="ok")
-    for _ in range(16):  # a healthy session first
-        history.extend((probe, _event(EventType.TOOL_CALL, tool=ToolCall(name="shell"))))
-    for _ in range(30):  # then the responses stop arriving
+    for _ in range(16):
+        history.extend(
+            (
+                _event(EventType.TOOL_CALL, tool=shell),
+                _event(EventType.TOOL_RESULT, tool=shell, result="3 passed in 0.21s"),
+            )
+        )
+    for _ in range(30):
         pair = (
-            _event(EventType.TOOL_CALL, tool=ToolCall(name="read_file", input={"path": "x.jsonl"})),
-            _event(EventType.TOOL_RESULT, tool=ToolCall(name="read_file", input={"path": "x.jsonl"}), result=""),
+            _event(EventType.TOOL_CALL, tool=reader),
+            _event(EventType.TOOL_RESULT, tool=reader, result=""),
         )
         for made in pair:
             if detector.evaluate(made, history) is not None:
@@ -119,8 +135,12 @@ def capabilities(config: ShepherdConfig | None = None, ledger_root: str | None =
     still scored, they are just not silently counted as detector failures.
     """
     root = ledger_root or tempfile.mkdtemp(prefix="shepherd-cap-")
-    engine = PolicyEngine(config or default_config(), Ledger(root=root))
-    caps = {d.name for d in engine.detectors}
+    try:
+        engine = PolicyEngine(config or default_config(), Ledger(root=root))
+        caps = {d.name for d in engine.detectors}
+    finally:
+        if ledger_root is None:
+            shutil.rmtree(root, ignore_errors=True)
     if _has_signals():
         caps.add("signals")
     if _contract_scope():
@@ -290,7 +310,8 @@ def format_table(report: dict[str, Any]) -> str:
         delay = block["delay"]
         span = "-" if delay["mean"] is None else f"{delay['mean']:.1f}/{delay['max']}"
         nudges = sum(c["cost"]["nudges_emitted"] for c in report["cases"] if c["fault"] == kind)
-        flag = "" if block["answerable"] else "  (unanswerable here)"
+        missing = sorted(set(block["requires"]) - set(report["meta"]["capabilities"]))
+        flag = f"  (needs {'+'.join(missing)})" if missing else ""
         lines.append(
             f"{kind:24s} {block['recall']:7.2f} {block['f1']:6.2f} {span:>11s} "
             f"{block['false_alarms_per_session']:8.2f} {block['repeats_per_session']:6.2f} "

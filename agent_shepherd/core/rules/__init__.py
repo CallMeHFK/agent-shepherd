@@ -14,6 +14,7 @@ from .detectors import (
     OffSpecDetector,
     RegressionDetector,
 )
+from .rulebook import Rulebook, adherence_after_nudge
 from .signals import FAILED, OK, UNKNOWN, classify
 
 __all__ = [
@@ -27,5 +28,7 @@ __all__ = [
     "LoopDetector",
     "OffSpecDetector",
     "RegressionDetector",
+    "Rulebook",
+    "adherence_after_nudge",
     "classify",
 ]

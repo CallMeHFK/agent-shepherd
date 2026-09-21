@@ -50,6 +50,7 @@ from .rules.detectors import (
     OffSpecDetector,
     RegressionDetector,
 )
+from .rules.rulebook import Rulebook
 from .types import Agent, AgentEvent, EventType, Verdict, VerdictAction
 
 
@@ -127,6 +128,13 @@ class PolicyEngine:
             )
             self.detectors.append(self._drift)
         self.scorer = StepScorer(config.judge)
+        # The rulebook lives beside the ledger rather than at $SHEPHERD_HOME so
+        # that an engine pointed at a temp ledger cannot write into the user's
+        # real config directory.
+        self.rulebook_path = self.ledger.root / "rulebook.json"
+        self.rulebook: Rulebook | None = None
+        if config.policy.rulebook_enabled:
+            self.rulebook = Rulebook.load(self.rulebook_path)
         self.risk = RiskModel.load(
             defaults={
                 "judge": config.policy.nudge_threshold,
@@ -318,6 +326,34 @@ class PolicyEngine:
             pending = self.take_pending_verdict(event.agent, event.session_id)
             if pending is not None:
                 return pending
+
+        # Session start: promote the guidance this agent demonstrably followed
+        # in past sessions into context it sees before drifting, instead of
+        # re-nagging it mid-run (arXiv 2509.03990).
+        if event.event == EventType.PROMPT_SUBMIT and self.rulebook is not None:
+            header = self.rulebook.render_header(self.config.policy.rulebook_budget_tokens)
+            if header:
+                verdict = Verdict(
+                    action=VerdictAction.NUDGE,
+                    reason="house rules from past sessions",
+                    guidance=header,
+                    confidence=0.99,
+                    detector="rulebook",
+                )
+                self.ledger.record_verdict(
+                    event.agent, event.session_id, verdict, context=self._cost(state)
+                )
+                return verdict
+
+        # Session end: the whole trajectory is in the ledger, which is the only
+        # place "did the agent actually follow the nudge" can be answered.
+        if event.event == EventType.STOP and self.rulebook is not None:
+            self.rulebook.observe(
+                self.ledger.iter_records(event.agent, event.session_id),
+                agent=event.agent,
+                session_id=event.session_id,
+            )
+            self.rulebook.save(self.rulebook_path)
 
         # Tier 0 first: deterministic signals are cheap and always on.
         verdict = self._run_detectors(event, history)

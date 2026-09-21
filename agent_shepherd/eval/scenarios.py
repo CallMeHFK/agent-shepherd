@@ -93,6 +93,7 @@ class GroundTruth:
     onset: int | None
     requires: tuple[str, ...] = ()
     description: str = ""
+    block_start: int | None = None
 
     @property
     def is_drift(self) -> bool:
@@ -136,92 +137,133 @@ _THOUGHTS = (
     "Compare the two call sites so the guidance text stays identical.",
 )
 
-_ACTIONS: tuple[_Action, ...] = (
-    _Action(
-        "read_file",
-        {"path": IN_SCOPE[0], "offset": 120, "limit": 40},
-        "128\t@dataclass\n129\tclass SessionState:\n130\t    \"\"\"Sliding window of recent events for one session.\"\"\"\n"
-        "136\t    def push(self, event: AgentEvent) -> None:\n137\t        self.events.append(event)\n",
-    ),
-    _Action(
-        "read_file",
-        {"path": IN_SCOPE[1], "offset": 430, "limit": 40},
-        "436\t    def watch_level(self, event, history) -> float:\n437\t        if self.threshold <= 0:\n"
-        "439\t            return 0.0\n440\t        return self._statistic(event, history) / self.threshold\n",
-    ),
-    _Action(
-        "grep",
-        {"pattern": "watch_level", "path": "agent_shepherd"},
-        "agent_shepherd/core/rules/detectors.py:436:    def watch_level(self, event, history) -> float:\n"
-        "agent_shepherd/core/server.py:146:            return self._drift.watch_level(event, history)"
-        " >= self.config.policy.drift_watch_fraction\n",
-    ),
-    _Action(
-        "git_status",
-        {"args": ["status", "--short"]},
-        " M agent_shepherd/core/server.py\n M agent_shepherd/core/rules/detectors.py\n"
-        "?? agent_shepherd/eval/harness.py\n",
-    ),
-    _Action(
-        "git_diff",
-        {"args": ["diff", "--stat"]},
-        " agent_shepherd/core/server.py            | 12 +++++++---\n"
-        " agent_shepherd/core/rules/detectors.py   |  9 ++++++++-\n 2 files changed, 17 insertions(+), 4 deletions(-)\n",
-    ),
-    _Action(
-        "read_file",
-        {"path": IN_SCOPE[2], "offset": 1, "limit": 30},
-        "1\t\"\"\"Benchmark driver: scenarios -> PolicyEngine -> metrics.\"\"\"\n2\t\n"
-        "3\tfrom __future__ import annotations\n",
-    ),
-    _Action(
-        "run_tests",
-        {"paths": ["tests/test_detectors.py"], "cmd": "pytest tests/test_detectors.py -q"},
-        "============================= test session starts ==============================\n"
-        "collected 12 items\n\ntests/test_detectors.py ............                       [100%]\n"
-        "12 passed in 0.71s\n",
-        ("tests/test_detectors.py",),
-    ),
-    _Action(
-        "run_lint",
-        {"cmd": "ruff check agent_shepherd"},
-        "All checks passed!\n",
-    ),
-    _Action(
-        "edit_file",
-        {"path": IN_SCOPE[0], "replace": "watch_level gate"},
-        f"The file {IN_SCOPE[0]} has been updated successfully.\n",
-    ),
-    _Action(
-        "edit_file",
-        {"path": IN_SCOPE[1], "replace": "horizon in calibrate"},
-        f"The file {IN_SCOPE[1]} has been updated successfully.\n",
-    ),
-    _Action(
-        "write_file",
-        {"path": IN_SCOPE[3], "contents": "def test_gate_wakes_on_onset():\n    assert True\n"},
-        f"File created successfully at: {IN_SCOPE[3]}\n",
-    ),
-    _Action(
-        "run_tests",
-        {"paths": ["tests/test_wake_gate.py"], "cmd": "pytest tests/test_wake_gate.py -q"},
-        "collected 3 items\n\ntests/test_wake_gate.py ...                              [100%]\n3 passed in 0.22s\n",
-        ("tests/test_wake_gate.py",),
-    ),
+_READ_SERVER = _Action(
+    "read_file",
+    {"path": IN_SCOPE[0], "offset": 120, "limit": 40},
+    "128\t@dataclass\n129\tclass SessionState:\n130\t    \"\"\"Sliding window of recent events for one session.\"\"\"\n"
+    "136\t    def push(self, event: AgentEvent) -> None:\n137\t        self.events.append(event)\n",
+    (IN_SCOPE[0],),
 )
+_READ_DETECTORS = _Action(
+    "read_file",
+    {"path": IN_SCOPE[1], "offset": 430, "limit": 40},
+    "436\t    def watch_level(self, event, history) -> float:\n437\t        if self.threshold <= 0:\n"
+    "439\t            return 0.0\n440\t        return self._statistic(event, history) / self.threshold\n",
+    (IN_SCOPE[1],),
+)
+_READ_HARNESS = _Action(
+    "read_file",
+    {"path": IN_SCOPE[2], "offset": 1, "limit": 30},
+    "1\t\"\"\"Benchmark driver: scenarios -> PolicyEngine -> metrics.\"\"\"\n2\t\n"
+    "3\tfrom __future__ import annotations\n",
+    (IN_SCOPE[2],),
+)
+_READ_NEW_TEST = _Action(
+    "read_file",
+    {"path": IN_SCOPE[3], "offset": 1, "limit": 20},
+    "1\tdef test_gate_wakes_on_onset():\n2\t    verdict = engine.process(failing_result)\n"
+    "3\t    assert verdict.action == VerdictAction.PASS\n",
+    (IN_SCOPE[3],),
+)
+_EDIT_NEW_TEST = _Action(
+    "edit_file",
+    {"path": IN_SCOPE[3], "replace": "assert the parked verdict drains"},
+    f"The file {IN_SCOPE[3]} has been updated successfully.\n",
+    (IN_SCOPE[3],),
+)
+_GREP = _Action(
+    "grep",
+    {"pattern": "watch_level", "path": "agent_shepherd"},
+    "agent_shepherd/core/rules/detectors.py:436:    def watch_level(self, event, history) -> float:\n"
+    "agent_shepherd/core/server.py:146:            return self._drift.watch_level(event, history)"
+    " >= self.config.policy.drift_watch_fraction\n",
+    (IN_SCOPE[0], IN_SCOPE[1]),
+)
+_GIT_STATUS = _Action(
+    "git_status",
+    {"args": ["status", "--short"]},
+    " M agent_shepherd/core/server.py\n M agent_shepherd/core/rules/detectors.py\n"
+    "?? agent_shepherd/eval/harness.py\n",
+    (IN_SCOPE[0], IN_SCOPE[1], IN_SCOPE[2]),
+)
+_GIT_DIFF = _Action(
+    "git_diff",
+    {"args": ["diff", "--stat"]},
+    " agent_shepherd/core/server.py            | 12 +++++++---\n"
+    " agent_shepherd/core/rules/detectors.py   |  9 ++++++++-\n 2 files changed, 17 insertions(+), 4 deletions(-)\n",
+    (IN_SCOPE[0], IN_SCOPE[1]),
+)
+_RUN_TESTS = _Action(
+    "run_tests",
+    {"paths": ["tests/test_detectors.py"], "cmd": "pytest tests/test_detectors.py -q"},
+    "============================= test session starts ==============================\n"
+    "collected 12 items\n\ntests/test_detectors.py ............                       [100%]\n"
+    "12 passed in 0.71s\n",
+    ("tests/test_detectors.py",),
+)
+_RUN_NEW_TESTS = _Action(
+    "run_tests",
+    {"paths": ["tests/test_wake_gate.py"], "cmd": "pytest tests/test_wake_gate.py -q"},
+    "collected 3 items\n\ntests/test_wake_gate.py ...                              [100%]\n3 passed in 0.22s\n",
+    (IN_SCOPE[3],),
+)
+_RUN_LINT = _Action(
+    "run_lint",
+    {"cmd": "ruff check agent_shepherd"},
+    "All checks passed!\n",
+)
+_EDIT_SERVER = _Action(
+    "edit_file",
+    {"path": IN_SCOPE[0], "replace": "watch_level gate"},
+    f"The file {IN_SCOPE[0]} has been updated successfully.\n",
+    (IN_SCOPE[0],),
+)
+_EDIT_DETECTORS = _Action(
+    "edit_file",
+    {"path": IN_SCOPE[1], "replace": "horizon in calibrate"},
+    f"The file {IN_SCOPE[1]} has been updated successfully.\n",
+    (IN_SCOPE[1],),
+)
+
+# Work packages, not a flat bag of calls: a file is read before it is edited.
+# That ordering is load-bearing rather than cosmetic — an edit to a path the
+# session never opened is *exactly* what the contract check (and, in real
+# harnesses, the edit tool itself) refuses, so a "clean" session that skipped
+# the read would be scoring a fixture bug. The corpus also never *creates* a
+# file: a first-ever ``write_file`` of a never-observed path is nudged by
+# construction, which is the contract's designed behaviour rather than a bug,
+# and would put a deliberate intervention into the null corpus. The clean
+# sessions here are therefore "work strictly inside the established set".
+_WORK: tuple[tuple[_Action, ...], ...] = (
+    (_READ_SERVER, _EDIT_SERVER),
+    (_READ_DETECTORS, _EDIT_DETECTORS),
+    (_READ_NEW_TEST, _EDIT_NEW_TEST),
+    (_READ_HARNESS,),
+    (_GREP,),
+    (_GIT_STATUS,),
+    (_GIT_DIFF,),
+    (_RUN_TESTS,),
+    (_RUN_LINT,),
+    (_RUN_NEW_TESTS,),
+)
+
+_CHECKS: tuple[_Action, ...] = (_RUN_TESTS, _RUN_LINT)
+_FILLER: tuple[_Action, ...] = (_GREP, _GIT_STATUS, _GIT_DIFF, _CHECKS[0], _CHECKS[1], _READ_HARNESS)
 
 
 def _action_cycle(rng: random.Random) -> Iterator[_Action]:
-    """Every action exactly once per pass: a clean session never repeats a call.
+    """Each work package once per pass, packages in shuffled order.
 
-    Sampling without replacement is what makes the loop detector's silence a
-    result rather than an accident: with a 5-event cycle and an 8-event window,
-    two calls of the same kind cannot even be seen together.
+    Permuting at package granularity keeps two properties the scoring depends
+    on: no call ever repeats (so the loop detector's silence on a clean session
+    is a result, not an accident of the 8-event window) and no edit ever
+    precedes its read (so the contract check's silence is likewise real).
     """
     while True:
-        batch = list(_ACTIONS)
-        rng.shuffle(batch)
-        yield from batch
+        units = list(_WORK)
+        rng.shuffle(units)
+        for unit in units:
+            yield from unit
 
 
 # --------------------------------------------------------------------------
@@ -341,14 +383,18 @@ _RED_TESTS = _fail(
 _DRIFT_STEPS: tuple[tuple[str, str], ...] = (
     (
         "python scripts/repro.py",
-        ("Traceback (most recent call last):\n  File \"/app/scripts/repro.py\", line 18, in <module>\n"
-        "    engine.process(event)\n  File \"/app/agent_shepherd/core/server.py\", line 197, in process\n"
-        "    verdict = self._run_detectors(event, history)\nValueError: unexpected history offset"),
+        (
+            "Traceback (most recent call last):\n  File \"/app/scripts/repro.py\", line 18, in <module>\n"
+            "    engine.process(event)\n  File \"/app/agent_shepherd/core/server.py\", line 197, in process\n"
+            "    verdict = self._run_detectors(event, history)\nValueError: unexpected history offset"
+        ),
     ),
     (
         "pip install -r requirements-dev.txt",
-        ("ERROR: Could not find a version that satisfies the requirement shepherd-eval==0.9\n"
-        "non-zero exit status 1"),
+        (
+            "ERROR: Could not find a version that satisfies the requirement shepherd-eval==0.9\n"
+            "non-zero exit status 1"
+        ),
     ),
     (
         "ls /app/.venv/bin",
@@ -364,8 +410,10 @@ _DRIFT_STEPS: tuple[tuple[str, str], ...] = (
     ),
     (
         "python -m agent_shepherd.cli replay s1",
-        ("Traceback (most recent call last):\n  File \"<frozen runpy>\", line 198, in _run_module_as_main\n"
-        "KeyError: 'session_id'"),
+        (
+            "Traceback (most recent call last):\n  File \"<frozen runpy>\", line 198, in _run_module_as_main\n"
+            "KeyError: 'session_id'"
+        ),
     ),
     (
         "cp agent_shepherd/eval/harness.py /tmp/h.py",
@@ -377,8 +425,10 @@ _DRIFT_STEPS: tuple[tuple[str, str], ...] = (
     ),
     (
         "python - <<'PY'\nimport agent_shepherd\nPY",
-        ("Traceback (most recent call last):\n  File \"<stdin>\", line 1, in <module>\n"
-        "ModuleNotFoundError: No module named 'agent_shepherd'"),
+        (
+            "Traceback (most recent call last):\n  File \"<stdin>\", line 1, in <module>\n"
+            "ModuleNotFoundError: No module named 'agent_shepherd'"
+        ),
     ),
     (
         "shepherd status",
@@ -524,8 +574,7 @@ def _f_binding_drift(sess: _Session) -> int:
     )
     # Time passes: the classifier read leaves the binding detector's lookback
     # while staying inside the contract check's full-session observation set.
-    filler = list(_ACTIONS[:6])
-    for action in filler:
+    for action in _FILLER:
         sess.reasoning(action.result.splitlines()[0][:60])
         sess.tool(action)
         sess.gate()
@@ -549,7 +598,7 @@ def _f_flaky_but_healthy(sess: _Session) -> int:
         sess.result("shell", {"cmd": cmd}, _fail(cmd, body))
         sess.reasoning("That step was optional; carry on with the plan.")
         sess.gate()
-        for action in _ACTIONS[6:8]:
+        for action in _CHECKS:
             sess.tool(action)
             sess.gate()
     return 0
@@ -667,7 +716,10 @@ def build_session(
     if fault not in FAULTS:
         raise KeyError(f"unknown fault: {fault}")
     spec = FAULTS[fault]
-    rng = random.Random(f"{fault}:{seed}:{steps}")
+    # Deliberately keyed on the corpus parameters and *not* on the fault: the
+    # clean prefix of an injected session must be byte-identical to the ``none``
+    # session, so every case is compared against its own control.
+    rng = random.Random(f"{seed}:{steps}")
     sess = _Session(session_id=session_id, agent=agent, rng=rng, start_ts=start_ts)
     sess.prompt(GOAL)
     actions = _action_cycle(rng)
@@ -684,6 +736,7 @@ def build_session(
         onset=onset,
         requires=spec.requires,
         description=spec.description,
+        block_start=block_start,
     )
     return Scenario(
         name=f"{fault}-{seed}",

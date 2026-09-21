@@ -13,6 +13,10 @@ A judge's self-reported confidence is *not* taken at face value: `nudge_threshol
 
 The design decisions above, and the papers that motivate them, are recorded in [RESEARCH_NOTES.md](RESEARCH_NOTES.md).
 
+Recurring guidance the agent demonstrably followed is promoted into a short
+"house rules" header injected at the start of each prompt instead of re-nagged
+mid-run (`policy.rulebook_enabled`).
+
 **Does it work?** `shepherd eval` runs an offline counterfactual benchmark: scripted healthy sessions plus a fault injector that breaks exactly one thing at a known step, scored for per-detector precision/recall, detection delay in steps, false-alarm rate, and supervision cost. It is deterministic, offline, and runs in CI.
 
 The judge model backend is pluggable: **Agnes** (`agnes-3.0-flash` via the Agnes AI Hub, OpenAI-compatible) is the default, and any OpenAI-compatible endpoint (local **vLLM**, cc-switch, etc.) works by setting `SHEPHERD_JUDGE_BASE_URL` / `SHEPHERD_JUDGE_MODEL`.
