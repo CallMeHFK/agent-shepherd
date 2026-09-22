@@ -320,25 +320,34 @@ class BindingDriftDetector(Detector):
             return None
         if event.tool.name not in _EDIT_TOOLS:
             return None
-        target = next((_clean_path(event.tool.input[k]) for k in _PATH_KEYS if event.tool.input.get(k)), None)
+        target = next(
+            (_display_path(event.tool.input[k]) for k in _PATH_KEYS if event.tool.input.get(k)), None
+        )
         if not target:
             return None
         recent = history[-self.lookback :]
-        inspected: set[str] = set()
+        # Keyed by the case-folded path, displayed as written: the fold is what
+        # makes "same file, different case" not a drift, and the agent has to be
+        # able to find the file the nudge names.
+        inspected: dict[str, str] = {}
+
+        def remember(path: str) -> None:
+            inspected.setdefault(path.lower(), path)
+
         for e in recent:
             if e.tool is None:
                 continue
             if e.event == EventType.TOOL_RESULT or e.tool.name not in _EDIT_TOOLS:
                 for k in _PATH_KEYS:
                     if e.tool.input.get(k):
-                        inspected.add(_clean_path(e.tool.input[k]))
+                        remember(_display_path(e.tool.input[k]))
             if e.event == EventType.TOOL_RESULT and e.tool_result:
                 for token in re.findall(r"[\w.\-]+/[\w./\-]+|[\w.\-]+\.[a-zA-Z]{1,5}", e.tool_result):
-                    inspected.add(_clean_path(token))
-        if target in inspected:
+                    remember(_display_path(token))
+        if target.lower() in inspected:
             return None
-        for seen in inspected:
-            if seen == target or self._sim(seen, target) < self.similarity:
+        for seen in inspected.values():
+            if seen.lower() == target.lower() or self._sim(seen, target) < self.similarity:
                 continue
             return Verdict(
                 action=VerdictAction.NUDGE,
@@ -357,9 +366,14 @@ class BindingDriftDetector(Detector):
         return None
 
 
-def _clean_path(value: object) -> str:
-    path = str(value).strip().strip("'\"").lower()
+def _display_path(value: object) -> str:
+    """Path as the agent wrote it, minus quotes and a leading ``./``."""
+    path = str(value).strip().strip("'\"")
     return path.removeprefix("./")
+
+
+def _clean_path(value: object) -> str:
+    return _display_path(value).lower()
 
 
 class ContextRotDetector(Detector):
