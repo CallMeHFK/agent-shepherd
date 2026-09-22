@@ -42,10 +42,12 @@ def test_the_zip_is_one_top_level_directory_holding_the_manifest(tmp_path):
     archive = builder.build(tmp_path / "dist")
     with zipfile.ZipFile(archive) as zf:
         names = zf.namelist()
+    assert archive.name == "agent-shepherd.zip", "named after the plugin, not the release"
     tops = {name.split("/")[0] for name in names}
     assert tops == {"agent-shepherd"}, f"expected exactly one top-level directory, got {tops}"
     assert "agent-shepherd/plugin.json" in names
     assert "agent-shepherd/backend/main.py" in names, "the manifest's entry.backend must be in the archive"
+    assert "agent-shepherd/README.md" in names, "whoever imports the zip inherits its prerequisites with it"
     assert not any(n.endswith(".pyc") or "__pycache__" in n for n in names), "tool caches are not payload"
 
 

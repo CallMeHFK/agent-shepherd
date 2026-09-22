@@ -49,12 +49,15 @@ def build(out_dir: Path = DIST) -> Path:
     """Write the plugin ZIP and return its path."""
     manifest = json.loads((BUNDLE / "plugin.json").read_text(encoding="utf-8"))
     plugin_id = manifest.get("id")
-    version = manifest.get("version")
-    if not plugin_id or not version:
+    if not plugin_id or not manifest.get("version"):
         raise BundleError("plugin.json needs both id and version")
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    target = out_dir / f"{plugin_id}-qwenpaw-plugin-{version}.zip"
+    # Named after the plugin, not the release: that makes the host's own id the
+    # thing you see in ~/.qwenpaw/plugins/, and gives importers a stable URL --
+    # releases/latest/download/agent-shepherd.zip never needs re-typing on
+    # upgrade. The version lives in plugin.json, which is what the host reads.
+    target = out_dir / f"{plugin_id}.zip"
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in bundle_files():
             info = zipfile.ZipInfo(
