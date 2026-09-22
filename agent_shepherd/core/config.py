@@ -366,6 +366,18 @@ def fields_of(cls):
     return fields(cls)
 
 
+def _backup_and_write(path: Path, raw: dict) -> None:
+    """Write ``raw`` to ``path``, preserving the previous file first.
+
+    Local copy of the adapters' safety helper: core must not import from adapters.
+    """
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    aside = path.with_name(f"{path.name}.bak-{stamp}")
+    shutil.copy2(path, aside)
+    print(f"previous config preserved at {aside}")
+    path.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
 def merge_missing_keys(path: Path | str | None = None, *, dry_run: bool = False) -> tuple[list[str], Path | None]:
     """Add any setting the file does not mention, keeping the user's values.
 
@@ -392,11 +404,30 @@ def merge_missing_keys(path: Path | str | None = None, *, dry_run: bool = False)
                 block[key] = value
                 added.append(f"{section}.{key}")
     if added and not dry_run:
-        # Local copy of the adapters' safety helper: core must not import from
-        # adapters.
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
-        aside = path.with_name(f"{path.name}.bak-{stamp}")
-        shutil.copy2(path, aside)
-        print(f"previous config preserved at {aside}")
-        path.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        _backup_and_write(path, raw)
     return added, path
+
+
+def prune_stale_keys(path: Path | str | None = None, *, dry_run: bool = False) -> tuple[list[str], Path | None]:
+    """Drop keys the current release no longer reads.
+
+    ``merge`` only ever adds, so a retired setting stayed behind wearing the
+    look of a live control. This is the other half of that, with the same backup.
+    """
+    path = Path(path) if path else Path.home() / ".shepherd" / "config.yaml"
+    if not path.exists():
+        return [], None
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    removed: list[str] = []
+    for section in ("policy", "judge"):
+        block = raw.get(section)
+        if not isinstance(block, dict):
+            continue
+        allowed = {f.name for f in fields_of(PolicyConfig if section == "policy" else JudgeConfig)}
+        for key in list(block):
+            if key not in allowed:
+                del block[key]
+                removed.append(f"{section}.{key}")
+    if removed and not dry_run:
+        _backup_and_write(path, raw)
+    return removed, path

@@ -68,6 +68,26 @@ Start the daemon:
 shepherd start
 ```
 
+### Finding your way around the config
+
+You are not meant to hold this file in your head. Every setting has an owner
+(`file`, `env:NAME`, or `default`), and the CLI says which:
+
+```bash
+shepherd doctor               # what is configured, what is missing, what to do next
+shepherd config show          # every effective setting and where the value came from
+shepherd config set policy.drift_watch_fraction 0.5   # one setting, no editor
+shepherd config judge         # model names your judge endpoint actually accepts
+shepherd config merge         # add settings an older config file predates
+shepherd config prune         # drop settings it no longer configures anything
+```
+
+`doctor` is the entry point: it prints the adapter install paths, the judge
+endpoint and whether it answers, whether the daemon is up, and which admission
+thresholds are priors versus calibrated. Keys retired by a release are reported
+as `STALE` rather than silently ignored, because a dead setting in the file
+looks exactly like a live one.
+
 ## Adapters
 
 ### QwenPaw (in-process plugin, highest fidelity)
@@ -167,9 +187,6 @@ against code that is no longer on disk.
 Interactions in this project are governed by our
 [Code of Conduct](CODE_OF_CONDUCT.md).
 
-## License
-
-MIT
 ## Running the daemon
 
 ```bash
@@ -216,3 +233,7 @@ sent, and loopback/LAN endpoints bypass proxy environment:
 export SHEPHERD_JUDGE_BASE_URL=http://127.0.0.1:19991/v1
 export SHEPHERD_JUDGE_MODEL=<name from that endpoint's /v1/models>
 ```
+
+## License
+
+MIT

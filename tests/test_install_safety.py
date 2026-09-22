@@ -72,6 +72,34 @@ def test_codex_install_keeps_existing_groups(home):
     assert after["description"] == "user"
 
 
+def test_qwenpaw_install_keeps_one_bundle_in_the_plugin_scan_path(home):
+    """Regression: the installer used to move the previous bundle to
+    ``plugins/agent-shepherd.prev-<stamp>``, i.e. still inside the directory
+    QwenPaw scans. Every copy carries the same manifest id, so the stale bundle
+    was loaded as a second plugin and could win — the agent ran last release's
+    middleware while every check pointed at the freshly written path."""
+    from agent_shepherd.adapters.qwenpaw.install import install_qwenpaw
+
+    plugins = home / ".qwenpaw" / "plugins"
+    (plugins / "agent-shepherd").mkdir(parents=True)
+    (plugins / "agent-shepherd" / "backend").mkdir()
+    (plugins / "agent-shepherd" / "backend" / "main.py").write_text("old\n", encoding="utf-8")
+    (plugins / "agent-shepherd.prev-20260921-091308").mkdir()
+    (plugins / "agent-shepherd.prev-20260921-091308" / "backend").mkdir()
+    (plugins / "agent-shepherd.prev-20260921-091308" / "backend" / "main.py").write_text("older\n", encoding="utf-8")
+    (plugins / "cad").mkdir()
+    (plugins / "cad" / "keep.txt").write_text("untouched\n", encoding="utf-8")
+
+    install_qwenpaw(ShepherdConfig.load(home / "missing.yaml"), dry_run=False)
+
+    copies = sorted(p.name for p in plugins.iterdir() if p.name.startswith("agent-shepherd"))
+    assert copies == ["agent-shepherd"], "no duplicate-id bundle left in the scan path"
+    assert (plugins / "cad" / "keep.txt").read_text() == "untouched\n", "foreign plugins untouched"
+    assert "trust_env=False" in (plugins / "agent-shepherd" / "backend" / "main.py").read_text()
+    archived = sorted(p.name for p in (home / ".qwenpaw" / "plugin-archive").iterdir())
+    assert "agent-shepherd.prev-20260921-091308" in archived, "the old copy is kept, just out of the scan path"
+
+
 def test_hook_survives_a_socks_proxy_environment(monkeypatch):
     """Regression: with ALL_PROXY=socks5:// every hook call raised ImportError
     (httpx needs an optional extra for SOCKS), so the installed hook crashed on

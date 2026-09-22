@@ -52,6 +52,7 @@ def _parser() -> argparse.ArgumentParser:
     setter.add_argument("key")
     setter.add_argument("value")
     cfgsub.add_parser("merge", help="add settings this file predates, keeping your values")
+    cfgsub.add_parser("prune", help="delete settings this file no longer configures anything")
     cfgsub.add_parser("judge", help="list model names the configured judge endpoint accepts")
 
     sub.add_parser("doctor", help="what is configured, what is missing, what to do next")
@@ -277,12 +278,19 @@ def main(argv: list[str] | None = None) -> int:
             stale = cfgmod.stale_keys(path)
             if stale:
                 print("\nSTALE keys in the file (they configure nothing any more): " + ", ".join(stale))
-                print("run `shepherd config merge` to add settings the file predates.")
+                print("run `shepherd config prune` to drop them, `shepherd config merge` to add settings the file predates.")
             return 0
 
         if args.subcommand == "merge":
             added, written = cfgmod.merge_missing_keys(path)
             print(f"added {len(added)} setting(s): " + (", ".join(added) if added else "none — file is current"))
+            if written:
+                print(f"wrote {written}")
+            return 0
+
+        if args.subcommand == "prune":
+            removed, written = cfgmod.prune_stale_keys(path)
+            print(f"removed {len(removed)} stale key(s): " + (", ".join(removed) if removed else "none — file is clean"))
             if written:
                 print(f"wrote {written}")
             return 0
@@ -361,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
         stale = cfgmod.stale_keys(path)
         if stale:
             problems += 1
-            print(f"STALE keys   {', '.join(stale)} -> run `shepherd config merge`")
+            print(f"STALE keys   {', '.join(stale)} -> run `shepherd config prune` (merge only adds)")
         if not cfg.judge.model:
             problems += 1
             print("judge.model  UNSET -> `shepherd config judge` lists accepted names")
