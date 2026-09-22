@@ -557,33 +557,31 @@ def _f_ambiguous_loss(sess: _Session) -> int:
 
 
 def _f_binding_drift(sess: _Session) -> int:
-    """Right tool, wrong entity: editing a sibling of the file just inspected.
+    """Right tool, wrong entity: the canonical form from arXiv 2607.18316.
 
-    Only the *reachable* form is scripted here. The canonical form from
-    arXiv 2607.18316 (``cat config.py`` then ``edit config.py.bak``) is owned by
-    the contract check instead, because a never-seen path is out of contract
-    before it can be mis-bound.
+    ``read detectors.py`` then ``edit detectors.py.bak``. The tool is right, the
+    argument is a near-miss sibling of the one just resolved, and the call
+    succeeds, so nothing but the name betrays it.
+
+    An earlier draft scripted "read two in-scope files, edit the first one"
+    instead. That is not binding drift at all -- editing a file the session read
+    is normal work -- and it only registered because the detector compared whole
+    paths, so two unrelated files in one directory looked confusable.
     """
-    seed_args = {"path": "agent_shepherd/core/rules/signals.py"}
-    sess.call("read_file", seed_args)
+    inspected = {"path": "agent_shepherd/core/rules/detectors.py"}
+    sess.call("read_file", inspected)
     sess.result(
         "read_file",
-        seed_args,
-        "117\tdef classify(event: AgentEvent) -> Outcome:\n118\t    if event.event != EventType.TOOL_RESULT:\n"
-        "119\t        return Outcome(OK, 'not_a_result')\n",
+        inspected,
+        "436\t    def watch_level(self, event, history) -> float:\n437\t    if event.event != EventType.TOOL_RESULT:\n",
     )
-    # Time passes: the classifier read leaves the binding detector's lookback
-    # while staying inside the contract check's full-session observation set.
+    # Time passes, and the read stays inside the binding detector's lookback.
     for action in _FILLER:
         sess.reasoning(action.result.splitlines()[0][:60])
         sess.tool(action)
         sess.gate()
-    now = {"path": IN_SCOPE[1]}
-    sess.call("read_file", now)
-    sess.result("read_file", now, "436\t    def watch_level(self, event, history) -> float:\n")
-    target = seed_args
-    sess.call("edit_file", {"path": target["path"], "replace": "treat empty output as unobservable"})
-    return 28  # seed read (2) + 6 filler iterations (24) + the sibling read (2)
+    sess.call("edit_file", {"path": f"{inspected['path']}.bak", "replace": "treat empty output as unobservable"})
+    return 26  # seed read (2) + 6 filler iterations (24); the edit is event 26
 
 
 def _f_flaky_but_healthy(sess: _Session) -> int:

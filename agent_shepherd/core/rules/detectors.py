@@ -305,9 +305,29 @@ class BindingDriftDetector(Detector):
         self.similarity = similarity
         self.lookback = lookback
 
-    @staticmethod
-    def _tokens(path: str) -> set[str]:
-        return {t for t in re.split(r"[^a-z0-9]+", path.lower()) if len(t) > 1}
+    _SEPARATOR = re.compile(r"[_.\-\s]+")
+    _TEST_MARK = re.compile(r"(?:^|[_.\-])(?:test|tests|spec)(?:[_.\-]|$)")
+
+    @classmethod
+    def _basename(cls, path: str) -> str:
+        return re.split(r"[/\\]", path)[-1].lower()
+
+    @classmethod
+    def _is_test(cls, path: str) -> bool:
+        return bool(cls._TEST_MARK.search(cls._basename(path)))
+
+    @classmethod
+    def _tokens(cls, path: str) -> set[str]:
+        """Segments of the *filename*, case-folded but otherwise intact.
+
+        Two choices here are load-bearing. The directory is excluded: every file
+        a session touches shares it, so folding it in made unrelated siblings
+        like ``detectors.py`` and ``signals.py`` score 0.71 and nudge. And
+        segmentation is by separator rather than by ``[^a-z0-9]+``, because the
+        latter deleted every non-ASCII character and made any two Chinese-named
+        files in a directory compare identical.
+        """
+        return {t for t in cls._SEPARATOR.split(cls._basename(path)) if len(t) > 1}
 
     def _sim(self, a: str, b: str) -> float:
         ta, tb = self._tokens(a), self._tokens(b)
@@ -348,6 +368,12 @@ class BindingDriftDetector(Detector):
             return None
         for seen in inspected.values():
             if seen.lower() == target.lower() or self._sim(seen, target) < self.similarity:
+                continue
+            # Overlapping names only imply a mis-binding risk between artifacts
+            # of the same kind: reading an implementation and editing its test is
+            # the normal direction of work, and the two share every token but the
+            # marker.
+            if self._is_test(seen) != self._is_test(target):
                 continue
             return Verdict(
                 action=VerdictAction.NUDGE,
