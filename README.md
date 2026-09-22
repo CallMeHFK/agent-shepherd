@@ -103,6 +103,36 @@ Installs `~/.qwenpaw/plugins/agent-shepherd` and restart QwenPaw. The plugin reg
 
 A zero-install REST/SSE fallback client (`agent_shepherd.adapters.qwenpaw.rest_client.QwenPawRestClient`) observes `127.0.0.1:19999` and resolves Tool Guard approvals.
 
+#### Take the bundle from a release instead of a checkout
+
+Every `v*` release attaches the plugin bundle as a zip, so an agent can install
+without this repository anywhere on disk:
+
+```bash
+qwenpaw plugin install \
+  https://github.com/CallMeHFK/agent-shepherd/releases/download/v0.2.0/agent-shepherd-qwenpaw-plugin-0.2.0.zip
+```
+
+The same file works as a local path (`qwenpaw plugin install <...>.zip`), and the
+app's plugin routes accept both too — upload the zip, or hand it the URL. While
+QwenPaw is running either way hot-loads the plugin; while it is stopped the tree
+lands in `~/.qwenpaw/plugins/agent-shepherd/` and loads on the next start. The
+archive holds exactly what `shepherd install qwenpaw` writes, and a test asserts
+the two cannot drift apart.
+
+Two ways this fails quietly, both worth naming:
+
+* **Not the source archive.** GitHub's auto-generated
+  `.../archive/refs/tags/v0.2.0.zip` unpacks to `agent-shepherd-0.2.0/` with no
+  `plugin.json` in it, which the installer rejects. Use the release asset.
+* **A bundle is not a supervisor.** The zip is only the in-process observer; it
+  POSTs to `127.0.0.1:4890` and fails open when nothing listens there — so it
+  loads, registers, and supervises nothing. Install and start the daemon first:
+
+```bash
+uv pip install agent-shepherd && shepherd start-bg && shepherd status
+```
+
 ### Claude Code
 
 ```bash
