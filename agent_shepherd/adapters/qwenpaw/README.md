@@ -13,8 +13,11 @@ stop handler, and supervises nothing, which looks exactly like a working
 install. So the daemon has to be there:
 
 ```bash
-# the package is not on PyPI
+# The package is not on PyPI. The release carries its wheel, for a box with no
+# git client; the git URL is the same code and stays valid across versions.
+pip install https://github.com/CallMeHFK/agent-shepherd/releases/download/v0.2.0/agent_shepherd-0.2.0-py3-none-any.whl
 uv pip install "git+https://github.com/CallMeHFK/agent-shepherd.git@v0.2.0"
+
 shepherd start-bg
 shepherd status        # "up", and check the `code loaded from:` line it prints
 ```

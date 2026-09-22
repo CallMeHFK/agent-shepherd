@@ -2,15 +2,15 @@ name: release
 
 # The plugin bundle is a release asset, not a package artifact: QwenPaw installs
 # it from the release's zip URL, so the file has to be there by the time anyone
-# reads the release page. Building it here also means a hand-written release
-# cannot forget the one file every importer actually needs.
+# reads the release page. Building everything here also means a hand-written
+# release cannot forget the files every importer actually needs.
 on:
   push:
     tags:
       - "v*"
 
 jobs:
-  plugin-bundle:
+  release-assets:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -20,18 +20,24 @@ jobs:
       # assignment is checked separately because `set -e` does not see a failure
       # hidden inside an echo's command substitution.
       - name: Build the QwenPaw plugin zip
-        id: bundle
+        id: plugin
         run: |
           set -euo pipefail
           zip=$(python3 packaging/build_plugin_zip.py)
           echo "zip=$zip" >> "$GITHUB_OUTPUT"
-      # Everything interpolated from the event or a step output reaches the
+      # The bundle is only the observer; the daemon it talks to is a Python
+      # package. Shipping the wheel and sdist too means a box with no git client
+      # can still install the supervisor straight from the release page.
+      - uses: astral-sh/setup-uv@v5
+      - name: Build the daemon wheel and sdist
+        run: uv build --out-dir dist
+      # Every value interpolated from the event or a step output reaches the
       # shell as an environment variable, never as script text: a tag name is a
       # refname, and refnames allow backquotes and `$`.
-      - name: Attach it to the release
+      - name: Attach them to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ZIP: ${{ steps.bundle.outputs.zip }}
+          PLUGIN_ZIP: ${{ steps.plugin.outputs.zip }}
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
@@ -39,9 +45,13 @@ jobs:
             gh release create "$tag" --title "$tag" \
               --notes "Built from the $tag tag. The attached zip is the QwenPaw plugin bundle; the supervisor daemon is a separate install (see the README inside the archive)."
           fi
-          gh release upload "$tag" "$ZIP" --clobber
-      - name: Asset URL
+          gh release upload "$tag" "$PLUGIN_ZIP" dist/*.whl dist/*.tar.gz --clobber
+      - name: Asset URLs
         env:
-          ZIP: ${{ steps.bundle.outputs.zip }}
+          PLUGIN_ZIP: ${{ steps.plugin.outputs.zip }}
           REPO: ${{ github.repository }}
-        run: echo "https://github.com/$REPO/releases/download/$GITHUB_REF_NAME/$(basename "$ZIP")"
+        run: |
+          set -euo pipefail
+          for f in "$PLUGIN_ZIP" dist/*.whl dist/*.tar.gz; do
+            echo "https://github.com/$REPO/releases/download/$GITHUB_REF_NAME/$(basename "$f")"
+          done

@@ -36,8 +36,9 @@ ledger of everything it saw, and ships an offline counterfactual benchmark so
 ## Quick start
 
 ```bash
-# the supervisor. not on PyPI; install from the repo (or `uv pip install -e .` in a checkout)
-uv pip install "git+https://github.com/CallMeHFK/agent-shepherd.git@v0.2.0"
+# the supervisor. not on PyPI — either of these two, both checked:
+uv pip install "git+https://github.com/CallMeHFK/agent-shepherd.git@v0.2.0"  # needs git
+pip install https://github.com/CallMeHFK/agent-shepherd/releases/download/v0.2.0/agent_shepherd-0.2.0-py3-none-any.whl  # needs no git client
 
 shepherd start-bg              # daemon on 127.0.0.1:4890; writes ~/.shepherd/config.yaml on first start
 shepherd install qwenpaw       # or: claude | codex — writes hooks, never clobbers them blind
@@ -114,21 +115,28 @@ The derivations, the papers behind them and the negative results are in
 
 ## Adapters
 
-### QwenPaw — in-process plugin, highest fidelity
+| Adapter | Install | What lands where | How a verdict gets back to the agent | Worth knowing |
+| --- | --- | --- | --- | --- |
+| **QwenPaw** | `shepherd install qwenpaw` | bundle copied to `~/.qwenpaw/plugins/agent-shepherd` | an agentscope `MiddlewareBase` sees every reasoning delta and tool call in-process; a `StopGate` asks for a verdict at each ReAct iteration boundary and injects guidance as a new user turn (`INTERRUPT_AND_CONTINUE`) | highest fidelity, and it needs a QwenPaw restart to load. No plugin? The zero-install REST/SSE client (`adapters.qwenpaw.rest_client.QwenPawRestClient`) watches `127.0.0.1:19999` and resolves Tool Guard approvals instead |
+| **Claude Code** | `shepherd install claude` | `PreToolUse` / `PostToolUse` / `Stop` / `UserPromptSubmit` in `~/.claude/settings.json` | `shepherd-hook claude` translates the verdict into `hookSpecificOutput.additionalContext` / `decision` | one short-lived hook process per event, so the daemon must be up or the hook fails open |
+| **Codex CLI** | `shepherd install codex` | the same events in `~/.codex/hooks.json`, in Codex's schema: a top-level `hooks` map of matcher groups with `{"type": "command"}` handlers | `additionalContext`, or a top-level `decision: "block"` | Codex only runs hooks it has *persisted as trusted* — see below |
+
+**Codex hook trust.** The interactive TUI prompts the first time it sees the new
+hooks; approve once and later sessions run them. Non-interactive `codex exec`
+**silently skips** untrusted hooks, so automation has to opt out of the persisted
+trust explicitly:
 
 ```bash
-shepherd install qwenpaw
+codex exec --skip-git-repo-check --dangerously-bypass-hook-trust "..."
 ```
 
-Copies the bundle to `~/.qwenpaw/plugins/agent-shepherd`; restart QwenPaw to
-load it. The plugin registers an agentscope `MiddlewareBase` that observes every
-reasoning delta and tool call in-process, plus a `StopGate` that asks the daemon
-for a verdict at each ReAct iteration boundary and injects guidance as a new user
-turn. A zero-install REST/SSE fallback
-(`agent_shepherd.adapters.qwenpaw.rest_client.QwenPawRestClient`) observes
-`127.0.0.1:19999` and resolves Tool Guard approvals instead.
+Installing any adapter is conservative: the previous `settings.json` /
+`hooks.json` is copied to a timestamped `.bak` first, an unparseable existing
+file is refused rather than replaced, foreign hook groups are left alone, and a
+previous QwenPaw bundle is moved to `~/.qwenpaw/plugin-archive/` instead of
+being deleted.
 
-#### Import it from a release instead of a checkout
+### Import the bundle from a release instead of a checkout
 
 Every `v*` release attaches the bundle as a zip named after the plugin, so an
 agent can install it without this repository anywhere on disk:
@@ -147,50 +155,19 @@ loads it on the next start. The archive holds exactly what `shepherd install
 qwenpaw` writes — including a `README.md` that says what the bundle does *not*
 bring — and a test asserts the two trees cannot drift apart.
 
-Two ways this fails quietly:
+Three things worth knowing about that asset:
 
-* **Not the source archive.** GitHub's auto-generated
-  `.../archive/refs/tags/v0.2.0.zip` unpacks to `agent-shepherd-0.2.0/` with no
-  `plugin.json` where the installer looks, and is rejected.
 * **A bundle is not a supervisor.** The zip is the observer only; it POSTs to
   `127.0.0.1:4890` and fails open when nothing listens there, so it loads,
-  registers, and supervises nothing.
-
-### Claude Code
-
-```bash
-shepherd install claude
-```
-
-Writes `PreToolUse` / `PostToolUse` / `Stop` / `UserPromptSubmit` hooks into
-`~/.claude/settings.json`. The hook thin-shell (`shepherd-hook claude`)
-translates a verdict into Claude Code's `hookSpecificOutput.additionalContext` /
-`decision`.
-
-### Codex CLI
-
-```bash
-shepherd install codex
-```
-
-Writes the same events into `~/.codex/hooks.json` using the Codex-specific
-schema: a top-level `hooks` map of matcher groups with `{"type": "command"}`
-handlers.
-
-**Hook trust.** Codex only runs hooks persisted as trusted. In the interactive
-TUI it prompts the first time it sees them; approve once and later sessions run
-them. Non-interactive `codex exec` **silently skips** untrusted hooks, so
-automation has to opt out of the persisted trust explicitly:
-
-```bash
-codex exec --skip-git-repo-check --dangerously-bypass-hook-trust "..."
-```
-
-Installing any adapter is conservative: the previous `settings.json` /
-`hooks.json` is copied to a timestamped `.bak` first, an unparseable existing
-file is refused rather than replaced, foreign hook groups are left alone, and a
-previous QwenPaw bundle is moved to `~/.qwenpaw/plugin-archive/` instead of
-being deleted.
+  registers, and supervises nothing. The same release carries the daemon's wheel
+  and sdist for that half — see [Quick start](#quick-start).
+* **Not the source archive.** GitHub's auto-generated
+  `.../archive/refs/tags/v0.2.0.zip` unpacks to `agent-shepherd-0.2.0/`, and the
+  manifest lives at `agent_shepherd/adapters/qwenpaw/plugin.json` inside it —
+  both installers look in the archive root or one top-level directory, so the
+  archive is rejected.
+* **The version is inside, not in the name.** That is what lets
+  `releases/latest/download/agent-shepherd.zip` be a permanent URL.
 
 ## Judge backends
 
