@@ -105,20 +105,24 @@ A zero-install REST/SSE fallback client (`agent_shepherd.adapters.qwenpaw.rest_c
 
 #### Take the bundle from a release instead of a checkout
 
-Every `v*` release attaches the plugin bundle as a zip, so an agent can install
-without this repository anywhere on disk:
+Every `v*` release attaches the plugin bundle as a zip named after the plugin,
+so an agent can install without this repository anywhere on disk:
 
 ```bash
 qwenpaw plugin install \
-  https://github.com/CallMeHFK/agent-shepherd/releases/download/v0.2.0/agent-shepherd-qwenpaw-plugin-0.2.0.zip
+  https://github.com/CallMeHFK/agent-shepherd/releases/download/v0.2.0/agent-shepherd.zip
 ```
 
-The same file works as a local path (`qwenpaw plugin install <...>.zip`), and the
-app's plugin routes accept both too — upload the zip, or hand it the URL. While
-QwenPaw is running either way hot-loads the plugin; while it is stopped the tree
-lands in `~/.qwenpaw/plugins/agent-shepherd/` and loads on the next start. The
-archive holds exactly what `shepherd install qwenpaw` writes, and a test asserts
-the two cannot drift apart.
+`.../releases/latest/download/agent-shepherd.zip` is the same position for
+whoever wants to stay current — the version the host displays comes from the
+`plugin.json` inside, not from the filename. The same file works as a local path
+(`qwenpaw plugin install agent-shepherd.zip`), and the app's plugin routes accept
+both too — upload the zip, or hand it the URL. While QwenPaw is running either
+way hot-loads the plugin; while it is stopped the tree lands in
+`~/.qwenpaw/plugins/agent-shepherd/` and loads on the next start. The archive
+holds exactly what `shepherd install qwenpaw` writes — including the `README.md`
+that tells whoever imported it what the bundle does *not* bring — and a test
+asserts the two trees cannot drift apart.
 
 Two ways this fails quietly, both worth naming:
 
