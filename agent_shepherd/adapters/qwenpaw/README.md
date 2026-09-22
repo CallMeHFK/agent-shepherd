@@ -13,7 +13,8 @@ stop handler, and supervises nothing, which looks exactly like a working
 install. So the daemon has to be there:
 
 ```bash
-uv pip install agent-shepherd
+# the package is not on PyPI
+uv pip install "git+https://github.com/CallMeHFK/agent-shepherd.git@v0.2.0"
 shepherd start-bg
 shepherd status        # "up", and check the `code loaded from:` line it prints
 ```
