@@ -288,7 +288,7 @@ def test_binding_drift_quotes_paths_with_their_original_case():
     does not exist on a case-sensitive filesystem -- an agent told to re-check
     a file it cannot find stops trusting the nudge."""
     inspected = "/home/leo/out/patent-disclosure-MTS-ND-v2/专利交底书_MTS-ND_v2.0.md"
-    target = "/home/leo/out/patent-disclosure-MTS-ND-v2/prior_art_search.md"
+    target = "/home/leo/out/patent-disclosure-MTS-ND-v2/专利交底书_MTS-ND_v2.0.bak"
     verdict = _binding_case(inspected, target)
     assert verdict is not None and verdict.detector == "binding"
     assert inspected in verdict.reason
@@ -299,3 +299,45 @@ def test_binding_drift_treats_a_case_only_difference_as_the_same_file():
     """Matching stays case-insensitive: a path differing only in case is the
     file already read, not a near-miss sibling."""
     assert _binding_case("/srv/app/config/Settings.yaml", "/srv/app/config/settings.yaml") is None
+
+
+def test_binding_drift_stays_silent_on_different_names_in_one_directory():
+    """The directory is shared by every file a session touches, so folding it
+    into the similarity made ordinary multi-file work look like a mis-binding:
+    reading detectors.py and editing signals.py scored 0.71 and nudged. Seen
+    live 2026-09-22, and baked into the benchmark's own binding_drift case."""
+    assert (
+        _binding_case("/repo/core/rules/detectors.py", "/repo/core/rules/signals.py") is None
+    )
+
+
+def test_binding_drift_stays_silent_on_unrelated_non_ascii_names():
+    """The old tokenizer split on ``[^a-z0-9]+``, which deleted every CJK
+    character: two unrelated Chinese-named documents in one directory compared
+    as identical (similarity 1.0) and always nudged. Any project with
+    non-ASCII filenames was guaranteed false alarms."""
+    assert _binding_case("/out/专利交底书_v2.md", "/out/客户需求说明书_v2.md") is None
+
+
+def test_binding_drift_fires_on_the_same_name_under_a_different_directory():
+    """The other reachable form of right-file-wrong-place: reading the judge's
+    risk.py and editing the rules one."""
+    verdict = _binding_case(
+        "agent_shepherd/core/judge/risk.py", "agent_shepherd/core/rules/risk.py"
+    )
+    assert verdict is not None and verdict.detector == "binding"
+
+
+def test_binding_drift_fires_on_the_canonical_sibling():
+    """arXiv 2607.18316's own example: ``cat config.py`` then edit
+    ``config.py.bak``."""
+    verdict = _binding_case("/srv/app/config.py", "/srv/app/config.py.bak")
+    assert verdict is not None and verdict.detector == "binding"
+
+
+def test_binding_drift_stays_silent_between_a_module_and_its_own_tests():
+    """A filename overlap is only a mis-binding risk between *interchangeable*
+    artifacts. Reading the implementation and editing its test is ordinary work
+    -- and the two names share every token but the ``test_`` marker, so a pure
+    name-similarity rule flags nearly every TDD session."""
+    assert _binding_case("/repo/core/rules/detectors.py", "/repo/tests/test_detectors.py") is None
