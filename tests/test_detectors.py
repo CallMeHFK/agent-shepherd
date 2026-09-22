@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from agent_shepherd.core.rules.detectors import (
+    BindingDriftDetector,
     ContextRotDetector,
     CUSUMDriftDetector,
     LoopDetector,
@@ -266,3 +267,35 @@ def test_drift_detector_baseline_comes_from_the_pre_alarm_reference_period():
         for i in range(10, 20)
     ]
     assert detector.evaluate(failing[-1], healthy + failing[:-1]) is not None
+
+# --- BindingDriftDetector: the near-miss sibling of a resolved path ------
+
+
+def _binding_case(inspected: str, target: str):
+    detector = BindingDriftDetector()
+    history = [
+        ev(event=EventType.TOOL_CALL, tool=ToolCall(name="read", input={"path": inspected}), iteration=1)
+    ]
+    current = ev(
+        event=EventType.TOOL_CALL, tool=ToolCall(name="edit_file", input={"path": target}), iteration=2
+    )
+    return detector.evaluate(current, history)
+
+
+def test_binding_drift_quotes_paths_with_their_original_case():
+    """Regression (seen live 2026-09-22): the string used for comparison was
+    also the string displayed, so the guidance named a lowercased path that
+    does not exist on a case-sensitive filesystem -- an agent told to re-check
+    a file it cannot find stops trusting the nudge."""
+    inspected = "/home/leo/out/patent-disclosure-MTS-ND-v2/专利交底书_MTS-ND_v2.0.md"
+    target = "/home/leo/out/patent-disclosure-MTS-ND-v2/prior_art_search.md"
+    verdict = _binding_case(inspected, target)
+    assert verdict is not None and verdict.detector == "binding"
+    assert inspected in verdict.reason
+    assert inspected in verdict.guidance
+
+
+def test_binding_drift_treats_a_case_only_difference_as_the_same_file():
+    """Matching stays case-insensitive: a path differing only in case is the
+    file already read, not a near-miss sibling."""
+    assert _binding_case("/srv/app/config/Settings.yaml", "/srv/app/config/settings.yaml") is None
