@@ -37,8 +37,8 @@ ledger of everything it saw, and ships an offline counterfactual benchmark so
 
 ```bash
 # the supervisor. not on PyPI — either of these two, both checked:
-uv pip install "git+https://github.com/CallMeHFK/agent-shepherd.git@v0.2.0"  # needs git
-pip install https://github.com/CallMeHFK/agent-shepherd/releases/download/v0.2.0/agent_shepherd-0.2.0-py3-none-any.whl  # needs no git client
+uv pip install "git+https://github.com/CallMeHFK/agent-shepherd.git"   # or @v0.2.1 to pin
+pip install https://github.com/CallMeHFK/agent-shepherd/releases/latest/download/agent_shepherd-0.2.1-py3-none-any.whl  # no git client
 
 shepherd start-bg              # daemon on 127.0.0.1:4890; writes ~/.shepherd/config.yaml on first start
 shepherd install qwenpaw       # or: claude | codex — writes hooks, never clobbers them blind
@@ -143,17 +143,17 @@ agent can install it without this repository anywhere on disk:
 
 ```bash
 qwenpaw plugin install \
-  https://github.com/CallMeHFK/agent-shepherd/releases/download/v0.2.0/agent-shepherd.zip
+  https://github.com/CallMeHFK/agent-shepherd/releases/latest/download/agent-shepherd.zip
 ```
 
-`.../releases/latest/download/agent-shepherd.zip` is the same position for
-whoever wants to stay current — the version the host displays comes from the
-`plugin.json` inside, not from the filename. A local path works identically
-(`qwenpaw plugin install agent-shepherd.zip`), and so do the app's plugin routes:
-upload the zip, or hand it the URL. Running QwenPaw hot-loads it; a stopped one
-loads it on the next start. The archive holds exactly what `shepherd install
-qwenpaw` writes — including a `README.md` that says what the bundle does *not*
-bring — and a test asserts the two trees cannot drift apart.
+That URL is permanent — the bundle is named after the plugin, not the release,
+because the version the host displays comes from the `plugin.json` inside it. To
+install one known release, swap `latest` for the tag (`.../download/v0.2.1/...`).
+A local path works identically (`qwenpaw plugin install agent-shepherd.zip`), and
+so do the app's plugin routes: upload the zip, or hand it the URL. Running QwenPaw
+hot-loads it; a stopped one loads it on the next start. The archive holds exactly
+what `shepherd install qwenpaw` writes — including a `README.md` that says what
+the bundle does *not* bring — and a test asserts the two trees cannot drift apart.
 
 Three things worth knowing about that asset:
 
@@ -161,11 +161,11 @@ Three things worth knowing about that asset:
   `127.0.0.1:4890` and fails open when nothing listens there, so it loads,
   registers, and supervises nothing. The same release carries the daemon's wheel
   and sdist for that half — see [Quick start](#quick-start).
-* **Not the source archive.** GitHub's auto-generated
-  `.../archive/refs/tags/v0.2.0.zip` unpacks to `agent-shepherd-0.2.0/`, and the
-  manifest lives at `agent_shepherd/adapters/qwenpaw/plugin.json` inside it —
-  both installers look in the archive root or one top-level directory, so the
-  archive is rejected.
+* **Not the source archive.** GitHub's auto-generated archive of a tag unpacks to
+  `agent-shepherd-<version>/`, and the manifest sits at
+  `agent_shepherd/adapters/qwenpaw/plugin.json` inside it — both installers look
+  in the archive root or one top-level directory, so it is rejected. The release
+  asset is the only installable zip here.
 * **The version is inside, not in the name.** That is what lets
   `releases/latest/download/agent-shepherd.zip` be a permanent URL.
 
