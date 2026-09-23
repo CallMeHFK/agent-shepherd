@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-shepherd"
-version = "0.2.0"
+version = "0.2.1"
 description = "A supervisor plugin that observes AI coding agents (Claude Code, Codex, QwenPaw) and injects corrective guidance when they drift off course."
 readme = "README.md"
 license = "MIT"
