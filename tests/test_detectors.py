@@ -287,8 +287,8 @@ def test_binding_drift_quotes_paths_with_their_original_case():
     also the string displayed, so the guidance named a lowercased path that
     does not exist on a case-sensitive filesystem -- an agent told to re-check
     a file it cannot find stops trusting the nudge."""
-    inspected = "/srv/out/vendor-audit-v2/验收报告_va_v2.0.md"
-    target = "/srv/out/vendor-audit-v2/验收报告_va_v2.0.bak"
+    inspected = "/srv/out/vendor-audit-v2/acceptance_report_v2.0.md"
+    target = "/srv/out/vendor-audit-v2/acceptance_report_v2.0.bak"
     verdict = _binding_case(inspected, target)
     assert verdict is not None and verdict.detector == "binding"
     assert inspected in verdict.reason
