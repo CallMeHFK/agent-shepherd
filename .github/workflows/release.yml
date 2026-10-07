@@ -16,6 +16,24 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      # A tag is typed by hand and ci.yml cannot see it: v9.9.9 pushed on this
+      # tree would ship a release named v9.9.9 whose assets are 0.2.1. Compare
+      # before anything is built. The tag arrives as argv, never script text.
+      - name: Check the tag matches the package version
+        run: |
+          set -euo pipefail
+          python3 - "$GITHUB_REF_NAME" <<'PYEOF'
+          import re
+          import sys
+          from pathlib import Path
+
+          tag = sys.argv[1].removeprefix("v")
+          text = Path("pyproject.toml").read_text(encoding="utf-8")
+          version = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE).group(1)
+          if tag != version:
+              sys.exit(f"tag {sys.argv[1]} does not match pyproject version {version}")
+          print(f"tag matches version {version}")
+          PYEOF
       # Stdlib only (json + zipfile), so this needs no dependency sync. The
       # assignment is checked separately because `set -e` does not see a failure
       # hidden inside an echo's command substitution.

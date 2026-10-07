@@ -42,3 +42,14 @@ def test_the_releases_named_in_the_docs_are_the_current_one():
     named = {(doc.relative_to(ROOT).as_posix(), v) for doc in docs for v in pattern.findall(doc.read_text(encoding="utf-8"))}
     stale = sorted(item for item in named if item[1] != __version__)
     assert not stale, f"docs name a release other than {__version__}: {stale}"
+
+
+def test_the_release_workflow_refuses_a_tag_that_lies_about_the_version():
+    """ci.yml gates the commit, but a tag is typed by hand: tagging v9.9.9 on a
+    0.2.1 tree ships a release whose name claims code its assets don't contain.
+    The workflow must compare the tag against the package version before it
+    builds anything."""
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    guard = workflow.index("Check the tag matches the package version")
+    first_build = workflow.index("Build the QwenPaw plugin zip")
+    assert guard < first_build, "the version guard must run before any asset is built"
