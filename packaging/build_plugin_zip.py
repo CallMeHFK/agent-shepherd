@@ -28,20 +28,20 @@ class BundleError(RuntimeError):
     """The bundle cannot be shipped as-is."""
 
 
-def bundle_files(bundle: Path = BUNDLE) -> list[Path]:
+def bundle_files() -> list[Path]:
     """Return the bundle's files in archive order, excluding tool caches."""
     files: list[Path] = []
-    for path in sorted(bundle.rglob("*")):
+    for path in sorted(BUNDLE.rglob("*")):
         if path.is_symlink():
             # extractall() does not restore symlinks: the member lands as a plain
             # file whose bytes are the link target, and the plugin still claims
             # to have installed.
             raise BundleError(f"refusing to ship symlink: {path}")
-        relative = path.relative_to(bundle)
+        relative = path.relative_to(BUNDLE)
         if path.is_file() and not SKIP_DIRS.intersection(relative.parts):
             files.append(path)
     if not files:
-        raise BundleError(f"nothing to bundle under {bundle}")
+        raise BundleError(f"nothing to bundle under {BUNDLE}")
     return files
 
 
