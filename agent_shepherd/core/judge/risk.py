@@ -187,10 +187,16 @@ class RiskModel:
                 for k, v in self.samples.items()
             },
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
-        os.replace(tmp, self.path)
+        # Failures are swallowed on purpose, same as Rulebook.save: the samples
+        # are a recomputable cache and this runs on every session STOP, so a
+        # read-only home must never wedge a supervised session.
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            return
 
 
 def truncate_guidance(text: str | None, max_tokens: int) -> str | None:

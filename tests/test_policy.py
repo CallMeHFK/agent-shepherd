@@ -704,3 +704,15 @@ def test_events_seen_is_exact_under_concurrent_ingest(tmp_path):
 
     assert max_active == 1, f"{max_active} threads mutated session state at once"
     assert engine.stats(Agent.QWENPAW, "race")["events_seen"] == per_thread * n_threads
+
+
+def test_risk_save_never_propagates_oserror(tmp_path):
+    """note_outcome runs on every STOP; a save failure must not propagate
+    through process() into the HTTP handler thread."""
+    from agent_shepherd.core.judge.risk import RiskModel
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    model = RiskModel(defaults={}, target_fpr=0.05, path=blocker / "risk.json")
+    model.observe("judge", 0.9, True)
+    model.save()  # the destination is unwritable; save must swallow OSError
