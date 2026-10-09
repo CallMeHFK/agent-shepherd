@@ -35,16 +35,19 @@ def _daemon_url() -> str:
     return os.environ.get("SHEPHERD_DAEMON_URL", "http://127.0.0.1:4890").rstrip("/")
 
 
-def _post(path: str, payload: dict[str, Any], timeout: float = 5.0) -> dict[str, Any] | None:
+async def _post(path: str, payload: dict[str, Any], timeout: float = 5.0) -> dict[str, Any] | None:
     """POST to the daemon; fail open on any error.
 
     ``trust_env=False`` because the daemon is loopback: inheriting ALL_PROXY
     makes every call raise (SOCKS support is an optional httpx extra), which on
     a proxy-configured machine would silently disable supervision entirely.
+
+    Async because these run inside the agent's event loop: a blocking client
+    here stalls the whole agent for up to ``timeout`` per event.
     """
     try:
-        with httpx.Client(timeout=timeout, trust_env=False) as client:
-            resp = client.post(f"{_daemon_url()}{path}", json=payload)
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            resp = await client.post(f"{_daemon_url()}{path}", json=payload)
         resp.raise_for_status()
         return resp.json()
     except Exception as exc:  # noqa: BLE001 - fail open, never wedge the agent
@@ -120,11 +123,11 @@ def _agent_session_id(agent: Any) -> str:
     return "unknown"
 
 
-def _get(path: str, timeout: float = 2.0) -> dict[str, Any] | None:
+async def _get(path: str, timeout: float = 2.0) -> dict[str, Any] | None:
     """GET from the daemon; fail open on any error (loopback, see _post)."""
     try:
-        with httpx.Client(timeout=timeout, trust_env=False) as client:
-            resp = client.get(f"{_daemon_url()}{path}")
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            resp = await client.get(f"{_daemon_url()}{path}")
         resp.raise_for_status()
         return resp.json()
     except Exception:  # noqa: BLE001 - fail open, never wedge the agent
@@ -169,7 +172,7 @@ class SupervisorMiddleware(MiddlewareBase):
             yield item
         text = "".join(chunks)
         if text:
-            _post(
+            await _post(
                 "/ingest/qwenpaw",
                 _normalize_event(
                     session_id=self._resolve_session(agent),
@@ -196,7 +199,7 @@ class SupervisorMiddleware(MiddlewareBase):
                 tool_input = parsed if isinstance(parsed, dict) else {"raw": str(raw_input)}
             except (ValueError, TypeError):
                 tool_input = {"raw": str(raw_input)}
-        _post(
+        await _post(
             "/ingest/qwenpaw",
             _normalize_event(
                 session_id=self._resolve_session(agent),
@@ -247,10 +250,10 @@ class SupervisorGate(StopGate):
         # Drain a verdict that fired on an inline event (loop nudge during a
         # tool POST, contextrot during reasoning) — the gate boundary is the
         # only place the plugin can actually inject guidance.
-        pending = _get(f"/pending/qwenpaw/{session_id}")
+        pending = await _get(f"/pending/qwenpaw/{session_id}")
         verdict = pending or {}
         if not verdict:
-            verdict = _post(
+            verdict = await _post(
                 "/ingest/qwenpaw",
                 _normalize_event(
                     session_id=session_id,
