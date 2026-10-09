@@ -57,3 +57,18 @@ def test_parse_verdict_tolerates_missing_or_malformed_critique():
         '{"action": "nudge", "reason": "drift", "critique": [{"nope": 1}], "confidence": 0.7}',
     ):
         assert client.parse_verdict(payload).reason.startswith("drift")
+
+
+def test_judge_client_bypasses_proxy_for_loopback_and_lan():
+    """README: loopback/LAN endpoints bypass proxy environment. A LAN judge
+    (e.g. 192.168/10.x) inheriting ALL_PROXY raises ImportError without the
+    optional SOCKS extra and silently disables Tier 1."""
+    from agent_shepherd.core.judge.client import _trust_env_for
+
+    assert _trust_env_for("http://127.0.0.1:8000/v1") is False
+    assert _trust_env_for("http://localhost:8000/v1") is False
+    assert _trust_env_for("http://[::1]:8000/v1") is False
+    assert _trust_env_for("http://192.168.1.10:33000/v1") is False
+    assert _trust_env_for("http://10.0.0.5:8000/v1") is False
+    assert _trust_env_for("http://gateway.internal:19991/v1") is False
+    assert _trust_env_for("https://apihub.agnes-ai.com/v1") is True

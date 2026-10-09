@@ -7,11 +7,33 @@ prompt and scoring logic live in :mod:`agent_shepherd.core.judge.tier1`.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+from urllib.parse import urlparse
 
 import httpx
 
 from ..types import Verdict, VerdictAction
+
+
+def _trust_env_for(url: str) -> bool:
+    """Whether the judge HTTP client may inherit proxy environment.
+
+    Loopback and LAN endpoints must not: httpx raises ImportError there without
+    its optional SOCKS extra, which on a proxy-configured machine silently
+    disables Tier 1 entirely. ``:19991`` is the legacy LAN-gateway port
+    convention kept for endpoints reached by name rather than by IP.
+    """
+    host = urlparse(url).hostname or ""
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None and (ip.is_loopback or ip.is_private):
+        return False
+    return ":19991" not in url
 
 
 class JudgeClient:
@@ -55,11 +77,7 @@ class JudgeClient:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        # Loopback and LAN endpoints must not inherit proxy environment either:
-        # httpx raises ImportError there without its optional SOCKS extra.
-        local = ("127.0.0.1" in url) or ("localhost" in url) or ("::1" in url) or (":19991" in url)
-        trust_env = not local
-        with httpx.Client(timeout=self.timeout, trust_env=trust_env) as client:
+        with httpx.Client(timeout=self.timeout, trust_env=_trust_env_for(url)) as client:
             resp = client.post(url, headers=headers, json=payload)
         try:
             resp.raise_for_status()
