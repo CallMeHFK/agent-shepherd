@@ -652,3 +652,55 @@ def test_tier0_block_applies_when_block_enabled(tmp_path):
     )
     verdict = engine.process(event)
     assert verdict.action == VerdictAction.BLOCK
+
+
+def test_events_seen_is_exact_under_concurrent_ingest(tmp_path):
+    """ThreadingHTTPServer serves each connection on its own thread, so
+    per-session state mutations must be serialized: no two threads may be
+    inside SessionState.push at once, and no counter update may be lost."""
+    import threading
+
+    import agent_shepherd.core.server as server_mod
+
+    active = 0
+    max_active = 0
+
+    class ProbeState(server_mod.SessionState):
+        def push(self, event):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            time.sleep(0.005)
+            super().push(event)
+            active -= 1
+
+    cfg = ShepherdConfig(judge=JudgeConfig(), policy=PolicyConfig(), agents={})
+    engine = PolicyEngine(cfg, Ledger(root=tmp_path))
+    per_thread = 50
+    n_threads = 8
+
+    def worker() -> None:
+        for _ in range(per_thread):
+            engine.process(
+                AgentEvent(
+                    agent=Agent.QWENPAW,
+                    session_id="race",
+                    event=EventType.REASONING,
+                    ts=time.time(),
+                    reasoning="tick",
+                )
+            )
+
+    original = server_mod.SessionState
+    server_mod.SessionState = ProbeState
+    try:
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        server_mod.SessionState = original
+
+    assert max_active == 1, f"{max_active} threads mutated session state at once"
+    assert engine.stats(Agent.QWENPAW, "race")["events_seen"] == per_thread * n_threads

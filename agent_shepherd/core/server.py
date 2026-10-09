@@ -356,9 +356,13 @@ class PolicyEngine:
         # Capture the window *before* this event. Both the detectors and the
         # scorer expect ``history`` to exclude the current event (each accounts
         # for it itself); pushing first would double-count it.
-        history = list(state.events)
-        state.push(event)
-        state.events_seen += 1
+        # ThreadingHTTPServer serves each connection on its own thread; the
+        # snapshot/push/counter triple mutates shared per-session state and
+        # must be serialized or concurrent hooks lose events and counts.
+        with self._lock:
+            history = list(state.events)
+            state.push(event)
+            state.events_seen += 1
         key = (event.agent.value, event.session_id)
 
         # Session end first, before anything can return early: the whole
