@@ -340,6 +340,10 @@ def effective_settings(path: Path | str | None = None) -> list[dict]:
     return rows
 
 
+_TOP_LEVEL_KEYS = {"judge", "policy", "agents", "port"}
+_AGENT_KEYS = {"enabled", "block_enabled", "options"}
+
+
 def stale_keys(path: Path | str | None = None) -> list[str]:
     """Keys present in the file that no longer configure anything.
 
@@ -352,11 +356,20 @@ def stale_keys(path: Path | str | None = None) -> list[str]:
     except (OSError, yaml.YAMLError):
         return []
     out: list[str] = []
+    for key in raw:
+        if key not in _TOP_LEVEL_KEYS:
+            out.append(key)
     for section, keys in (("policy", raw.get("policy")), ("judge", raw.get("judge"))):
         allowed = {f.name for f in fields_of(PolicyConfig if section == "policy" else JudgeConfig)}
         for key in (keys or {}):
             if key not in allowed:
                 out.append(f"{section}.{key}")
+    agents = raw.get("agents")
+    if isinstance(agents, dict):
+        for name, opts in sorted(agents.items()):
+            for key in (opts or {}):
+                if key not in _AGENT_KEYS:
+                    out.append(f"agents.{name}.{key}")
     return sorted(out)
 
 
@@ -419,6 +432,10 @@ def prune_stale_keys(path: Path | str | None = None, *, dry_run: bool = False) -
         return [], None
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     removed: list[str] = []
+    for key in list(raw):
+        if key not in _TOP_LEVEL_KEYS:
+            del raw[key]
+            removed.append(key)
     for section in ("policy", "judge"):
         block = raw.get(section)
         if not isinstance(block, dict):
@@ -428,6 +445,15 @@ def prune_stale_keys(path: Path | str | None = None, *, dry_run: bool = False) -
             if key not in allowed:
                 del block[key]
                 removed.append(f"{section}.{key}")
+    agents = raw.get("agents")
+    if isinstance(agents, dict):
+        for name, opts in agents.items():
+            if not isinstance(opts, dict):
+                continue
+            for key in list(opts):
+                if key not in _AGENT_KEYS:
+                    del opts[key]
+                    removed.append(f"agents.{name}.{key}")
     if removed and not dry_run:
         _backup_and_write(path, raw)
     return removed, path

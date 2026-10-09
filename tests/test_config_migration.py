@@ -60,3 +60,24 @@ def test_merge_and_prune_together_converge_on_the_current_schema(tmp_path):
     import yaml
 
     assert yaml.safe_load(path.read_text(encoding="utf-8"))["policy"]["nudge_threshold"] == 0.55
+
+
+def test_stale_keys_flags_retired_top_level_and_agent_keys(tmp_path):
+    """Only policy/judge were inspected, so a retired root key or an
+    agents.<name> knob kept wearing the look of a live setting."""
+    path = _write(
+        tmp_path,
+        "retired_root: 1\n"
+        "agents:\n  claude:\n    enabled: true\n    old_knob: false\n",
+    )
+    assert cfgmod.stale_keys(path) == ["agents.claude.old_knob", "retired_root"]
+
+    removed, _ = cfgmod.prune_stale_keys(path)
+    assert removed == ["retired_root", "agents.claude.old_knob"]
+    assert cfgmod.stale_keys(path) == []
+
+    import yaml
+
+    after = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert "retired_root" not in after
+    assert after["agents"]["claude"] == {"enabled": True}
