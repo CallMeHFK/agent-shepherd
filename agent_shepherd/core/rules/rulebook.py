@@ -51,6 +51,7 @@ from typing import Any
 from ..ledger import Ledger, default_root
 from ..types import Agent, AgentEvent, EventType, ToolCall, Verdict
 from .detectors import (
+    _EDIT_TOOLS,
     ContextRotDetector,
     CUSUMDriftDetector,
     LoopDetector,
@@ -78,9 +79,9 @@ UNKNOWN_AGENT = "unknown"
 SCHEMA_VERSION = 1
 RULEBOOK_FILENAME = "rulebook.json"
 
-# Mirrors the inline literal in ``OffSpecDetector._edited_paths``; it is not a
-# module constant there, and this module must not refactor ``detectors.py``.
-_EDIT_TOOLS = frozenset({"write_file", "edit_file", "str_replace", "patch"})
+# ``_EDIT_TOOLS`` comes from detectors.py (imported above): what counts as an
+# edit for the detector and what counts as an edit for adherence judging must
+# be one set, or edits the detector flags escape the follow-up check.
 
 # Read off ``LoopDetector`` rather than restated, so "did the call actually
 # change?" and "is this a loop?" use one and the same similarity bar.

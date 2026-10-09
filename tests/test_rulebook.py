@@ -844,3 +844,14 @@ def test_a_near_duplicate_nudge_shares_the_loop_scorecard():
     assert list(book.stats) == [("qwenpaw", "loop")]
     assert book.stats[("qwenpaw", "loop")].adhered == 3
     assert book.rules()[0].detector == "loop"
+
+
+def test_edited_path_recognizes_the_claude_edit_tools():
+    """The rulebook's edit-tool set drifted from the detector's: edits made via
+    Claude's Write/Edit/MultiEdit/NotebookEdit escaped adherence judging."""
+    rec = {
+        "type": "event",
+        "event": "tool_call",
+        "tool": {"name": "Edit", "input": {"file_path": "core/server.py"}},
+    }
+    assert rb._edited_path(rec) == "core/server.py"
