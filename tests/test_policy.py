@@ -716,3 +716,33 @@ def test_risk_save_never_propagates_oserror(tmp_path):
     model = RiskModel(defaults={}, target_fpr=0.05, path=blocker / "risk.json")
     model.observe("judge", 0.9, True)
     model.save()  # the destination is unwritable; save must swallow OSError
+
+
+def test_disabled_agent_is_not_supervised(tmp_path):
+    """The starter config documents agents.<name>.enabled; it must actually
+    turn supervision off for that agent."""
+    from agent_shepherd.core.config import AgentConfig
+    from agent_shepherd.core.types import Verdict
+
+    cfg = ShepherdConfig(
+        judge=JudgeConfig(),
+        policy=PolicyConfig(),
+        agents={"claude": AgentConfig(enabled=False, block_enabled=True)},
+    )
+    engine = PolicyEngine(cfg, Ledger(root=tmp_path))
+    scorer = FakeScorer(
+        Verdict(action=VerdictAction.NUDGE, reason="drift", guidance="fix it", confidence=0.9, detector="judge")
+    )
+    engine.scorer = scorer
+    verdict = engine.process(
+        AgentEvent(
+            agent=Agent.CLAUDE,
+            session_id="off",
+            event=EventType.PROMPT_SUBMIT,
+            ts=time.time(),
+            prompt="hello",
+        )
+    )
+    assert verdict.action == VerdictAction.PASS
+    assert scorer.calls == 0, "a disabled agent must never reach the judge"
+    assert engine.stats(Agent.CLAUDE, "off") == {}, "a disabled agent keeps no session state"

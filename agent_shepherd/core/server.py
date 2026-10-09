@@ -351,6 +351,8 @@ class PolicyEngine:
 
     def process(self, event: AgentEvent) -> Verdict:
         """Consume one event and return a verdict for the adapter to apply."""
+        if not self.config.agent_config(event.agent.value).enabled:
+            return Verdict(action=VerdictAction.PASS, reason="agent disabled in config", confidence=0.0)
         self.ledger.record_event(event)
         state = self._state(event.agent, event.session_id)
         # Capture the window *before* this event. Both the detectors and the
