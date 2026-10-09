@@ -117,7 +117,7 @@ The derivations, the papers behind them and the negative results are in
 
 | Adapter | Install | What lands where | How a verdict gets back to the agent | Worth knowing |
 | --- | --- | --- | --- | --- |
-| **QwenPaw** | `shepherd install qwenpaw` | bundle copied to `~/.qwenpaw/plugins/agent-shepherd` | an agentscope `MiddlewareBase` sees every reasoning delta and tool call in-process; a `StopGate` asks for a verdict at each ReAct iteration boundary and injects guidance as a new user turn (`INTERRUPT_AND_CONTINUE`) | highest fidelity, and it needs a QwenPaw restart to load. No plugin? The zero-install REST/SSE client (`adapters.qwenpaw.rest_client.QwenPawRestClient`) watches `127.0.0.1:19999` and resolves Tool Guard approvals instead |
+| **QwenPaw** | `shepherd install qwenpaw` | bundle copied to `~/.qwenpaw/plugins/agent-shepherd` | an agentscope `MiddlewareBase` sees every reasoning delta and tool call in-process; a `StopGate` asks for a verdict at each text/stop boundary and injects guidance as a new user turn (`INTERRUPT_AND_CONTINUE`) — a verdict that fires mid-tool-call is parked and drained at the next such boundary, because the runner cannot inject there | highest fidelity, and it needs a QwenPaw restart to load. No plugin? The zero-install REST polling client (`adapters.qwenpaw.rest_client.QwenPawRestClient`) watches `127.0.0.1:19999` and resolves Tool Guard approvals instead |
 | **Claude Code** | `shepherd install claude` | `PreToolUse` / `PostToolUse` / `Stop` / `UserPromptSubmit` in `~/.claude/settings.json` | `shepherd-hook claude` translates the verdict into `hookSpecificOutput.additionalContext` / `decision` | one short-lived hook process per event, so the daemon must be up or the hook fails open |
 | **Codex CLI** | `shepherd install codex` | the same events in `~/.codex/hooks.json`, in Codex's schema: a top-level `hooks` map of matcher groups with `{"type": "command"}` handlers | `additionalContext`, or a top-level `decision: "block"` | Codex only runs hooks it has *persisted as trusted* — see below |
 
@@ -206,6 +206,13 @@ text. Keys retired by a release are reported `STALE` by `doctor` instead of
 being silently ignored, because a dead setting in a config file looks exactly
 like a live one.
 
+Three more environment variables point the pieces at each other:
+`SHEPHERD_HOME` moves the whole runtime directory (config, ledger, rulebook,
+risk model; default `~/.shepherd`), `SHEPHERD_PORT` overrides the port the
+daemon binds, and `SHEPHERD_DAEMON_URL` tells the hooks, the QwenPaw plugin
+and `shepherd status`/`doctor` where the daemon listens when it is not the
+default `http://127.0.0.1:4890`.
+
 <details>
 <summary>The starter config, in full</summary>
 
@@ -263,6 +270,12 @@ shepherd stats claude <session-id>     # events, judge calls, judge tokens, nudg
 
 `stats` is what makes the cost question answerable per session instead of per
 hunch.
+
+The daemon's whole wire surface, for anyone writing a fourth adapter:
+`POST /ingest/<agent>` (one normalized event in, one verdict out),
+`GET|POST /pending/<agent>/<session>` (drain a verdict that fired mid-event
+and was parked for the next gate boundary), `GET /stats/<agent>/<session>`
+(the live cost counters of one session), and `GET|POST /health`.
 
 ## Measuring it
 
