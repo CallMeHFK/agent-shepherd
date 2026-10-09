@@ -127,4 +127,4 @@ class Ledger:
 
     def iter_records(self, agent: Agent, session_id: str) -> list[dict[str, Any]]:
         """All records for a session, oldest first (for replay)."""
-        return list(reversed(self.recent(agent, session_id, limit=10**9)))
+        return self.recent(agent, session_id, limit=10**9)

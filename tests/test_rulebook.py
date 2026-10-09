@@ -367,8 +367,8 @@ def _write_session(root: Path, session_id: str, records: list[dict]) -> None:
 
 
 def test_from_ledger_replays_sessions_in_the_right_direction(tmp_path):
-    """``Ledger.iter_records`` hands records over newest-first, so the replay
-    path is exactly where a wrong order would show up as an empty book."""
+    """The replay path is exactly where a wrong ledger order would show up as
+    an empty book."""
     _write_session(tmp_path, "s1", _loop_session(True))
     _write_session(tmp_path, "s2", _loop_session(False))
     book = Rulebook.from_ledger(Ledger(root=tmp_path), Agent.QWENPAW, ["s1", "s2"])

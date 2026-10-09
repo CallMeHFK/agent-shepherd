@@ -38,3 +38,20 @@ def test_ledger_records_verdicts(tmp_path):
     assert records[0]["type"] == "verdict"
     assert records[0]["action"] == "nudge"
     assert records[0]["context"]["window"] == 3
+
+def test_iter_records_returns_oldest_first(tmp_path):
+    """iter_records documents "oldest first (for replay)" — and replay, tail and
+    the rulebook all rely on append order."""
+    ledger = Ledger(root=tmp_path)
+    for i in range(3):
+        ledger.record_event(
+            AgentEvent(
+                agent=Agent.QWENPAW,
+                session_id="s1",
+                event=EventType.REASONING,
+                ts=1000.0 + i,
+                reasoning=f"r{i}",
+            )
+        )
+    records = ledger.iter_records(Agent.QWENPAW, "s1")
+    assert [r["ts"] for r in records] == [1000.0, 1001.0, 1002.0]

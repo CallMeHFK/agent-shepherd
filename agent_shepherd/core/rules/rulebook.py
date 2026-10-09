@@ -259,14 +259,15 @@ def _touches_subject(rec: Mapping[str, Any], subject: tuple[str, str]) -> bool:
 def _in_order(records: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     """Normalize a record stream to ledger append order.
 
-    Needed because ``Ledger.iter_records`` says "oldest first" but returns
-    ``reversed(recent(...))`` — newest first — while ``Ledger.recent`` returns
-    append order. Rather than trust either name, take the majority direction of
-    the timestamps the ledger stamps on every record and flip once if that
-    majority is descending. A single reversal (never a sort) is important:
-    verdict records carry wall-clock ``ts`` while events carry the agent's own,
-    so sorting by time would split a verdict away from the event it judged and
-    break the "offending event = the one right before the verdict" rule.
+    ``Ledger.iter_records`` returned newest-first up to 0.2.1 while claiming
+    "oldest first"; streams built by hand (or written by an older daemon) may
+    still arrive either way. Rather than trust the source, take the majority
+    direction of the timestamps the ledger stamps on every record and flip once
+    if that majority is descending. A single reversal (never a sort) is
+    important: verdict records carry wall-clock ``ts`` while events carry the
+    agent's own, so sorting by time would split a verdict away from the event
+    it judged and break the "offending event = the one right before the
+    verdict" rule.
     """
     if len(records) < 2:
         return records
