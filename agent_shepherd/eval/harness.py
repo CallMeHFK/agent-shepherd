@@ -152,21 +152,12 @@ def capabilities(config: ShepherdConfig | None = None, ledger_root: str | None =
     finally:
         if ledger_root is None:
             shutil.rmtree(root, ignore_errors=True)
-    if _has_signals():
-        caps.add("signals")
+    caps.add("signals")
     if _contract_scope():
         caps.add("contract_scope")
     if _unobservable_alarm():
         caps.add("unobservable_alarm")
     return frozenset(caps)
-
-
-def _has_signals() -> bool:
-    try:
-        from ..core.rules import signals  # noqa: F401
-    except ImportError:
-        return False
-    return True
 
 
 def _run_session(

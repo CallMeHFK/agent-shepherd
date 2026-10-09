@@ -65,9 +65,6 @@ def test_lost_response_is_unknown_not_ok():
     is neither success nor failure (arXiv 2608.02645)."""
     outcome = signals.classify(result(""))
     assert outcome.state == signals.UNKNOWN
-    assert signals.signal_value(outcome) == 0.5
-    assert signals.signal_value(signals.classify(result("nope", exit_code=2))) == 1.0
-    assert signals.signal_value(signals.classify(result("fine"))) == 0.0
 
 
 def test_offspec_uses_the_session_contract_not_just_prompt_words():

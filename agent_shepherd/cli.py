@@ -30,8 +30,7 @@ def _parser() -> argparse.ArgumentParser:
     start_bg.add_argument("--port", type=int)
     sub.add_parser("stop", help="stop a daemon started with `shepherd start-bg`")
     sub.add_parser("status", help="report whether the daemon is up and what it has decided")
-    risk = sub.add_parser("risk", help="show the risk-controlled admission thresholds")
-    risk.add_argument("--fit-from-eval", action="store_true", help=argparse.SUPPRESS)
+    sub.add_parser("risk", help="show the risk-controlled admission thresholds")
 
     tail = sub.add_parser("tail", help="follow the audit ledger for a session")
     tail.add_argument("agent", choices=["qwenpaw", "claude", "codex"])
@@ -315,18 +314,9 @@ def main(argv: list[str] | None = None) -> int:
                 data.setdefault("agents", {}).setdefault(agent, {})[opt] = parsed
             else:
                 data.setdefault(section, {})[name] = parsed
-            from .adapters.backup import (
-                write_json,  # noqa: F401  (backup helper lives with adapters)
-            )
+            from .adapters.backup import backup
 
-            saved = None
-            if Path(path).exists():
-
-                stamp = time.strftime("%Y%m%d-%H%M%S")
-                saved = Path(path).with_name(f"{Path(path).name}.bak-{stamp}")
-                import shutil
-
-                shutil.copy2(path, saved)
+            saved = backup(Path(path))
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
             print(f"set {key} = {parsed!r} in {path}")
@@ -377,17 +367,17 @@ def main(argv: list[str] | None = None) -> int:
             f"judge        {cfg.judge.base_url} model={cfg.judge.model or '<unset>'} "
             f"key={'set' if cfg.judge.api_key else 'none (no auth header will be sent)'}"
         )
-        if True:  # loopback endpoints can be up and misconfigured too
-            import httpx
-
-            try:
-                httpx.get(f"{cfg.judge.base_url.rstrip('/')}/models", timeout=6.0, trust_env=False).raise_for_status()
-                print("judge reachability  ok")
-            except Exception as exc:  # noqa: BLE001
-                problems += 1
-                print(f"judge reachability  FAIL ({type(exc).__name__}) -> Tier 1 stays asleep, Tier 0 still runs")
-        url = os.environ.get("SHEPHERD_DAEMON_URL", f"http://127.0.0.1:{cfg.port}").rstrip("/")
+        # Loopback endpoints can be up and misconfigured too, so the
+        # reachability probe runs unconditionally.
         import httpx
+
+        try:
+            httpx.get(f"{cfg.judge.base_url.rstrip('/')}/models", timeout=6.0, trust_env=False).raise_for_status()
+            print("judge reachability  ok")
+        except Exception as exc:  # noqa: BLE001
+            problems += 1
+            print(f"judge reachability  FAIL ({type(exc).__name__}) -> Tier 1 stays asleep, Tier 0 still runs")
+        url = os.environ.get("SHEPHERD_DAEMON_URL", f"http://127.0.0.1:{cfg.port}").rstrip("/")
 
         try:
             httpx.get(f"{url}/health", timeout=3.0, trust_env=False).raise_for_status()

@@ -160,17 +160,3 @@ def _stringify(value: Any) -> str:
     if isinstance(value, str):
         return value
     return str(value)
-
-
-def signal_value(outcome: Outcome) -> float:
-    """The 0/0.5/1 value the drift statistic accumulates.
-
-    UNKNOWN contributes a half-step: an agent that keeps getting back nothing
-    observable is drifting, but we do not want an opaque tool to alarm as
-    loudly as a command that reported a real failure.
-    """
-    if outcome.state == FAILED:
-        return 1.0
-    if outcome.state == UNKNOWN:
-        return 0.5
-    return 0.0

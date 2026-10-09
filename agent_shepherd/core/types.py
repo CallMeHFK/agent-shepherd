@@ -90,14 +90,3 @@ class Verdict:
             "confidence": self.confidence,
             "detector": self.detector,
         }
-
-
-@dataclass
-class GuidanceMsg:
-    """A guidance message addressed at a specific agent session."""
-
-    agent: Agent
-    session_id: str
-    text: str
-    priority: str = "normal"  # "low" | "normal" | "high"
-    verdict: Verdict | None = None
