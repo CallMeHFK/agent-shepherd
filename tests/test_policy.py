@@ -604,3 +604,51 @@ def test_risk_prior_is_used_for_an_agent_with_no_history(tmp_path):
     engine = PolicyEngine(cfg, Ledger(root=tmp_path))
     assert engine.risk.threshold_for("codex:judge") == 0.60
     assert engine.risk.threshold_for("codex:judge_block") == 0.85
+
+
+def test_tier0_block_is_advisory_without_block_enabled(tmp_path):
+    """README: guidance is advisory until an agent sets block_enabled: true.
+
+    A Tier-0 deny-glob BLOCK reached the hooks even with block_enabled off,
+    bypassing the opt-in entirely.
+    """
+    from agent_shepherd.core.config import AgentConfig
+    from agent_shepherd.core.types import ToolCall
+
+    cfg = ShepherdConfig(
+        judge=JudgeConfig(),
+        policy=PolicyConfig(scope_deny_globs=["*.env"]),
+        agents={"claude": AgentConfig(enabled=True, block_enabled=False)},
+    )
+    engine = PolicyEngine(cfg, Ledger(root=tmp_path))
+    event = AgentEvent(
+        agent=Agent.CLAUDE,
+        session_id="s-deny",
+        event=EventType.TOOL_CALL,
+        ts=time.time(),
+        tool=ToolCall(name="Write", input={"file_path": "prod.env"}),
+    )
+    verdict = engine.process(event)
+    assert verdict.action == VerdictAction.NUDGE
+    assert "block withheld" in verdict.reason
+
+
+def test_tier0_block_applies_when_block_enabled(tmp_path):
+    from agent_shepherd.core.config import AgentConfig
+    from agent_shepherd.core.types import ToolCall
+
+    cfg = ShepherdConfig(
+        judge=JudgeConfig(),
+        policy=PolicyConfig(scope_deny_globs=["*.env"]),
+        agents={"claude": AgentConfig(enabled=True, block_enabled=True)},
+    )
+    engine = PolicyEngine(cfg, Ledger(root=tmp_path))
+    event = AgentEvent(
+        agent=Agent.CLAUDE,
+        session_id="s-deny",
+        event=EventType.TOOL_CALL,
+        ts=time.time(),
+        tool=ToolCall(name="Write", input={"file_path": "prod.env"}),
+    )
+    verdict = engine.process(event)
+    assert verdict.action == VerdictAction.BLOCK

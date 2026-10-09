@@ -209,37 +209,46 @@ class PolicyEngine:
         enough labeled outcomes have accumulated (see :func:`note_outcome`), and
         BLOCK is only ever emitted for an agent that opted in.
         """
-        if verdict.detector != "judge":
-            return self._budget(verdict)
-        if verdict.action == VerdictAction.NUDGE:
-            limit = self.risk.threshold_for(f"{agent.value}:judge")
-            if verdict.confidence < limit:
-                return Verdict(
-                    action=VerdictAction.PASS,
-                    reason=(
-                        f"judge nudge below risk-controlled admission line "
-                        f"(confidence {verdict.confidence:.2f} < {limit:.2f})"
-                    ),
-                    # Keep the score. A withheld verdict is still an observation
-                    # of what the judge believed, and the threshold is fitted from
-                    # the scores that were *rejected*.
-                    confidence=verdict.confidence,
-                    detector="judge",
-                )
-        if verdict.action in (VerdictAction.BLOCK, VerdictAction.ESCALATE):
-            limit = self.risk.threshold_for(f"{agent.value}:judge_block")
-            allowed = self.config.agent_config(agent.value).block_enabled
-            if verdict.confidence < limit or not allowed:
-                # Losing the authority to stop, keeping the advice.
-                return self._budget(
-                    Verdict(
+        if verdict.detector == "judge":
+            if verdict.action == VerdictAction.NUDGE:
+                limit = self.risk.threshold_for(f"{agent.value}:judge")
+                if verdict.confidence < limit:
+                    return Verdict(
+                        action=VerdictAction.PASS,
+                        reason=(
+                            f"judge nudge below risk-controlled admission line "
+                            f"(confidence {verdict.confidence:.2f} < {limit:.2f})"
+                        ),
+                        # Keep the score. A withheld verdict is still an observation
+                        # of what the judge believed, and the threshold is fitted from
+                        # the scores that were *rejected*.
+                        confidence=verdict.confidence,
+                        detector="judge",
+                    )
+            if verdict.action in (VerdictAction.BLOCK, VerdictAction.ESCALATE):
+                limit = self.risk.threshold_for(f"{agent.value}:judge_block")
+                if verdict.confidence < limit:
+                    verdict = Verdict(
                         action=VerdictAction.NUDGE,
                         reason=f"{verdict.reason} (block withheld)",
                         guidance=verdict.guidance,
                         confidence=verdict.confidence,
                         detector="judge",
                     )
-                )
+        # BLOCK/ESCALATE only ever fire for an agent that opted in -- and that
+        # holds for Tier 0 exactly as for the judge: a deterministic deny-glob
+        # is not a licence to stop an agent that asked for advice only.
+        if verdict.action in (VerdictAction.BLOCK, VerdictAction.ESCALATE) and not self.config.agent_config(
+            agent.value
+        ).block_enabled:
+            # Losing the authority to stop, keeping the advice.
+            verdict = Verdict(
+                action=VerdictAction.NUDGE,
+                reason=f"{verdict.reason} (block withheld)",
+                guidance=verdict.guidance,
+                confidence=verdict.confidence,
+                detector=verdict.detector,
+            )
         return self._budget(verdict)
 
     def _budget(self, verdict: Verdict) -> Verdict:
