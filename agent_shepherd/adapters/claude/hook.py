@@ -11,52 +11,12 @@ Usage (from a Claude Code hook config):
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from typing import Any
 
-import httpx
-
-
-def _daemon_url() -> str:
-    return os.environ.get("SHEPHERD_DAEMON_URL", "http://127.0.0.1:4890").rstrip("/")
-
-
-def _post(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-    # trust_env=False: the daemon is a loopback service, so honoring
-    # HTTP(S)_PROXY / ALL_PROXY here would both fail (a SOCKS proxy needs an
-    # optional extra) and send agent telemetry through an unrelated proxy.
-    try:
-        with httpx.Client(timeout=5.0, trust_env=False) as client:
-            resp = client.post(f"{_daemon_url()}{path}", json=payload)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception:  # noqa: BLE001
-        # A supervisor that raises on every tool call when its daemon is
-        # unreachable is worse than no supervisor: the host harness treats a
-        # crashing hook as an error on the action, not as a silent pass.
-        return None
-
-
-def _flatten_result(raw: Any) -> tuple[Any, dict[str, Any]]:
-    """Split a Claude Code tool response into display text + structured evidence.
-
-    Claude Code hands PostToolUse a ``tool_response`` that is often a *dict*
-    (Bash gives ``{stdout, stderr, exit_code, interrupted}``). Keeping the exit
-    code and the error flag as structured metadata is what lets the daemon tell
-    a real failure from output that merely contains the word "error" — flattening
-    everything into a string here would throw that evidence away.
-    """
-    extra: dict[str, Any] = {}
-    if isinstance(raw, dict):
-        for key in ("exit_code", "returncode", "is_error", "interrupted", "success"):
-            if key in raw:
-                extra[key] = raw[key]
-        parts = [str(raw[k]) for k in ("stdout", "stderr", "content", "output") if raw.get(k) is not None]
-        text = "\n".join(parts) if parts else json.dumps(raw, ensure_ascii=False)[:4000]
-        return text, extra
-    return raw, extra
+from ..daemon import flatten_result as _flatten_result
+from ..daemon import post as _post
 
 
 def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
