@@ -223,11 +223,11 @@ def main(argv: list[str] | None = None) -> int:
             elif args.agent == "claude":
                 from .adapters.claude.install import install_claude
 
-                install_claude(cfg, dry_run=args.dry_run)
+                install_claude(dry_run=args.dry_run)
             elif args.agent == "codex":
                 from .adapters.codex.install import install_codex
 
-                install_codex(cfg, dry_run=args.dry_run)
+                install_codex(dry_run=args.dry_run)
         except UnparseableConfig as exc:
             print(
                 f"refusing to write: {exc}\n"

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ...core.config import ShepherdConfig
 from ..backup import load_json_or_raise, write_json
 
 # Events this adapter subscribes to. ``matcher`` is honored for tool events but
@@ -29,7 +28,7 @@ _MATCHED = {"PreToolUse", "PostToolUse"}
 _LEGACY_TOP_LEVEL = _EVENTS + ["PostToolUseFailure"]
 
 
-def install_codex(cfg: ShepherdConfig, dry_run: bool = False) -> None:
+def install_codex(dry_run: bool = False) -> None:
     """Write the Codex hook config into ``~/.codex/hooks.json``."""
     hooks_path = Path.home() / ".codex" / "hooks.json"
     hooks_path.parent.mkdir(parents=True, exist_ok=True)

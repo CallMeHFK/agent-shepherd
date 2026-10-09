@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from ...core.config import ShepherdConfig
 from ..backup import load_json_or_raise, write_json
 
 
-def install_claude(cfg: ShepherdConfig, dry_run: bool = False) -> None:
+def install_claude(dry_run: bool = False) -> None:
     """Write the Claude Code hook config into ``~/.claude/settings.json``."""
     settings_path = Path.home() / ".claude" / "settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -27,10 +27,12 @@ def install_claude(cfg: ShepherdConfig, dry_run: bool = False) -> None:
 
     hooks = existing.setdefault("hooks", {})
     for event in events:
-        hooks[event] = hooks.get(event, [])
-        entry = {"matcher": "*", "hooks": [hook]}
-        if entry not in hooks[event]:
-            hooks[event].append(entry)
+        # Drop any shepherd entry whose shape predates the current one:
+        # idempotency by exact dict equality would leave both behind, and the
+        # hook would fire twice per event.
+        bucket = [e for e in hooks.get(event, []) if "shepherd-hook" not in json.dumps(e)]
+        bucket.append({"matcher": "*", "hooks": [hook]})
+        hooks[event] = bucket
 
     saved = write_json(settings_path, existing)
     print(f"installed Claude Code supervisor hooks -> {settings_path}")

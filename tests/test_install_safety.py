@@ -42,7 +42,7 @@ def test_unparseable_config_is_refused_not_replaced(home):
 def test_claude_install_preserves_unrelated_settings(home):
     settings = home / ".claude" / "settings.json"
     settings.write_text(json.dumps({"theme": "dark", "hooks": {}}), encoding="utf-8")
-    install_claude(ShepherdConfig.load(home / "missing.yaml"), dry_run=False)
+    install_claude(dry_run=False)
     after = json.loads(settings.read_text())
     assert after["theme"] == "dark", "the user's own keys survive"
     assert "PreToolUse" in after["hooks"] and "UserPromptSubmit" in after["hooks"]
@@ -50,10 +50,9 @@ def test_claude_install_preserves_unrelated_settings(home):
 
 def test_claude_install_is_idempotent(home):
     settings = home / ".claude" / "settings.json"
-    cfg = ShepherdConfig.load(home / "missing.yaml")
-    install_claude(cfg, dry_run=False)
+    install_claude(dry_run=False)
     first = json.loads(settings.read_text())
-    install_claude(cfg, dry_run=False)
+    install_claude(dry_run=False)
     assert json.loads(settings.read_text()) == first, "re-running does not duplicate hook groups"
 
 
@@ -64,7 +63,7 @@ def test_codex_install_keeps_existing_groups(home):
         json.dumps({"description": "user", "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [mine]}]}}),
         encoding="utf-8",
     )
-    install_codex(ShepherdConfig.load(home / "missing.yaml"), dry_run=False)
+    install_codex(dry_run=False)
     after = json.loads(hooks.read_text())
     group = after["hooks"]["PreToolUse"][0]
     assert group["matcher"] == "Bash" and group["hooks"] == [mine], "foreign group untouched"
@@ -122,3 +121,19 @@ def test_hook_never_raises_when_the_daemon_is_down(monkeypatch):
     monkeypatch.setenv("SHEPHERD_DAEMON_URL", "http://127.0.0.1:1")  # nothing listening
     assert chook._post("/ingest/claude", {"a": 1}) is None
     assert chook._response(None) == {}
+
+
+def test_claude_install_replaces_legacy_shepherd_entries(home):
+    """Idempotency by exact dict equality lets a legacy-shape shepherd entry
+    survive next to the new one, and the hook then fires twice per event."""
+    settings = home / ".claude" / "settings.json"
+    legacy = {"matcher": "*", "hooks": [{"type": "command", "command": "shepherd-hook claude", "timeout": 5}]}
+    keep = {"matcher": "Write", "hooks": [{"type": "command", "command": "other-tool"}]}
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [legacy, keep]}}), encoding="utf-8")
+
+    install_claude(dry_run=False)
+
+    entries = json.loads(settings.read_text())["hooks"]["PreToolUse"]
+    ours = [e for e in entries if "shepherd-hook" in json.dumps(e)]
+    assert ours == [{"matcher": "*", "hooks": [{"type": "command", "command": "shepherd-hook claude"}]}]
+    assert keep in entries, "unrelated hooks are preserved"
