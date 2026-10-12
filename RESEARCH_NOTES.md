@@ -394,11 +394,12 @@ into a rule — only the fixed detector texts are.
 ## Follow-ups considered, not implemented
 
 1. **Shepherd rulebook injection into the live loop** — *Meta-Policy Reflexion*
-   (<https://arxiv.org/abs/2509.03990>): the adherence analysis and the rendered
-   "house rules" header exist in `core/rules/rulebook.py` (held out of the
-   branch, see "Not shipped in this round"), and the engine does not yet inject
-   that header at `PROMPT_SUBMIT`. The ledger already records everything needed;
-   this is wiring, not research.
+   (<https://arxiv.org/abs/2509.03990>): **done, and this entry was stale when
+   entry 31 re-read it on 2026-10-12.** It claimed the engine "does not yet
+   inject that header at `PROMPT_SUBMIT`"; the injection shipped with item 14 —
+   `core/server.py:388` renders the header on `PROMPT_SUBMIT` and returns it as
+   a NUDGE with `detector="rulebook"` (`:396`). Kept here rather than deleted so
+   the numbering below stays stable.
 2. **Graph-based credit assignment** — GDCR (2605.29697): replace the
    "name the origin step" heuristic with a causal graph over steps for the
    judge's verdict. Higher precision, much more machinery.
@@ -1246,3 +1247,71 @@ sits in the *ranking* score, not in a missing acceptance test.
   the evidence-sufficiency clause in the judge prompt from entry 23 (P1, and
   measurable only by paying for `eval --judge`), injection-outcome
   verification, trajectory-grouped splits, and the combined-artifact gate.
+
+### 31. The open follow-ups were re-evaluated: one test shipped, four rejected
+
+Entry 30 left a graded list. Each item was re-read against the code before
+being built, and most did not survive. Recording the rejections matters as much
+as the one thing that shipped, because three of them were recommended by
+external analyses (entries 22, 23, 30) and would have been built on authority
+rather than on a defect anyone could point at.
+
+**Shipped: a report-level net for premature alarms on drift sessions.**
+`ci.yml` calls the benchmark "the regression net for 'a threshold change made
+the supervisor nag healthy sessions'", but only the clean-session half of that
+claim was asserted (`tests/test_eval.py:180-187` covers `CLEAN_KINDS`).
+`metrics.attribute` had scored a verdict with `index < onset` as a false
+positive all along (`eval/metrics.py:135-136`) and a unit test pinned the rule
+(`tests/test_eval.py:147`), so nothing in the *scoring* was broken — what was
+missing was any assertion that the shipped build obeys it on drift sessions. A
+detector that started firing before the injected fault existed would have
+passed CI. `test_answerable_drift_sessions_have_no_premature_alarms` now covers
+42 drift cases across 7 answerable fault kinds (0 false positives today), and
+`test_the_premature_alarm_check_can_fail` is its negative control: the same
+predicate over a mutated report must go red, so the net cannot pass vacuously.
+Zero production lines.
+
+**Rejected: the deployable-region line (entry 22's P1).** It would print
+`FAR ≤ ceiling ∧ step-accuracy ≥ floor` as one pass/fail. The FAR ceiling could
+come from `policy.drift_target_fpr`, but the accuracy floor has no source —
+AgentForesight's 50% is a property of *their* auditor on *their* corpus, and
+copying it would put a number in our output that nothing here measured.
+`--fail-under-f1 0.8` is already the CI gate and its value is pinned by
+`ci.yml`. Revisit only if a floor can be derived from something this repo owns.
+
+**Rejected: the paired gate on the risk-threshold refit (entry 30's P1).** The
+reasoning there was that this is the one loop where a candidate changes
+per-item outcomes and the labels are construction facts — true, but it missed
+that the loop is *already* gated by an anchored statistical rule rather than by
+an aggregate score: `calibrate()` takes the most permissive threshold whose
+(n+1)/n-corrected empirical false-intervention rate fits the budget
+(`core/judge/risk.py:64-96`), and `refit()` refuses to store a value when
+evidence is thinner than `min_samples` (`:163-177`). SAGE's target failure —
+committing because the aggregate went up — is not the mechanism here, so a
+paired win/loss gate would be a second opinion on a rule that already has a
+finite-sample bound. Revisit if the refit ever starts committing on aggregate
+improvement, or if the labels stop being construction facts.
+
+**Rejected: the boundary-pair offline script (entry 30's P1).** Redundant for
+the reason given above — pre-onset verdicts are already false positives and
+already unit-tested. The shipped test is the part that was actually missing.
+
+**Deferred: the evidence-sufficiency clause in the judge prompt (entry 23).**
+Two lines of prompt text, and its benefit is unmeasurable here: the paper's low
+FAR comes from RL training, not from wording, and the only way to measure the
+difference is `shepherd eval --judge`, which costs real judge calls. Item 12
+set the house rule — a default changed because the benchmark said so, not
+because a paper did. Shipping it blind would break that rule for no evidence.
+
+**Deferred: how `metrics.py` should score `detector="rulebook"` (entry 30's
+P2).** The mis-scoring is real (an intentionally injected prompt-start header
+is booked as a false alarm, which is why `default_config` disables the rulebook
+at `eval/harness.py:58-60`), but entry 30 also established that the corpus
+cannot react to rule *content*, so fixing the policy would buy the header's
+cost and never its benefit. Worth doing when someone wants that cost number.
+
+Still open from earlier sweeps and untouched here: follow-ups 2–7 (graph credit
+assignment, multi-view progress scoring, tool-call-rate steering, judge window
+assembly, per-agent eval breakdowns, ambiguity-aware `UNKNOWN` guidance),
+follow-up 8 (AFTraj as an external label corpus), and entry 23's
+injection-outcome verification and trajectory-grouped splits.
