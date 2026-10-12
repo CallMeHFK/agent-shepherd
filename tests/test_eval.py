@@ -354,3 +354,54 @@ def test_fit_risk_uses_construction_labels_and_respects_the_evidence_floor(tmp_p
     # And a report with no judge verdicts says so instead of writing noise.
     none = harness.fit_risk_from_report({"cases": []}, out_path=tmp_path / "none.json")
     assert none.get("fitted") is False and "no judge verdicts" in none.get("reason", "")
+
+
+def _assert_no_premature_alarms(report: dict) -> int:
+    """No answerable drift case may carry a false positive from before its onset."""
+    checked = 0
+    for kind, block in report["summary"]["by_fault"].items():
+        if kind in CLEAN_KINDS or not block["answerable"]:
+            continue
+        for case in _cases_of(report, kind):
+            onset = case["onset"]
+            assert onset is not None, (kind, case["session_id"])
+            premature = [v for v in case["false_positives"] if v["index"] < onset]
+            assert premature == [], (kind, onset, premature)
+            checked += 1
+    return checked
+
+
+def test_answerable_drift_sessions_have_no_premature_alarms(report):
+    """An alarm before the injected fault exists is a false alarm on a session
+    that is still healthy. ci.yml calls this benchmark "the regression net for
+    'a threshold change made the supervisor nag healthy sessions'", but only
+    the clean-session half of that was asserted (see the test above); a
+    detector that started firing early on drift sessions would have passed."""
+    assert _assert_no_premature_alarms(report) >= 5, (
+        "the build under test stopped scoring enough faults to be a check"
+    )
+
+
+def test_the_premature_alarm_check_can_fail(report):
+    """Negative control: the predicate above must actually be able to go red.
+
+    Without this the test could pass vacuously -- no answerable drift cases, or
+    an onset comparison that never fires -- and look like a regression net.
+    """
+    import copy
+
+    mutated = copy.deepcopy(report)
+    target = next(
+        (
+            case
+            for case in mutated["cases"]
+            if case["fault"] not in CLEAN_KINDS
+            and case["answerable"]
+            and (case["onset"] or 0) > 0
+        ),
+        None,
+    )
+    assert target is not None, "no answerable drift case to mutate"
+    target["false_positives"].append({"index": target["onset"] - 1, "detector": "loop"})
+    with pytest.raises(AssertionError):
+        _assert_no_premature_alarms(mutated)
