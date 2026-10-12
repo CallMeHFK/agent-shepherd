@@ -728,6 +728,34 @@ def _float(raw: Any) -> float:
         return 0.0
 
 
+#: Two-sided 95% normal quantile. Only the lower bound is ever used, so this
+#: is effectively a one-sided 97.5% bound — conservative in the direction that
+#: matters here: a rule with thin evidence is ranked as if it were worse than
+#: its point estimate says.
+WILSON_Z = 1.96
+
+
+def _wilson_lower_bound(wins: int, n: int) -> float:
+    """Conservative lower bound on a binomial rate (Wilson score interval).
+
+    The ranking score used to be ``adherence_rate * log1p(evidence)``, which
+    multiplies a rate by a function of the sample size, so a long mediocre
+    record beat a short perfect one (55/100 scored 2.54 against 6/6's 1.95).
+    That is the trade SAGE measures as a permanent regression when a gate
+    admits it (arXiv 2609.36043, entry 30). The raw rate has the opposite
+    defect — it ignores how little evidence backs it. The Wilson bound does
+    both at once: recurrence still raises the score, but only as much as the
+    evidence earns. Pure ``math``, no new dependency.
+    """
+    if n <= 0:
+        return 0.0
+    z2 = WILSON_Z * WILSON_Z
+    rate = wins / n
+    centre = rate + z2 / (2 * n)
+    spread = WILSON_Z * math.sqrt(rate * (1.0 - rate) / n + z2 / (4 * n * n))
+    return max(0.0, (centre - spread) / (1.0 + z2 / n))
+
+
 @dataclass(frozen=True)
 class Rule:
     """A promoted, evidence-backed rule. ``headline`` is the injected one-liner,
@@ -879,10 +907,10 @@ class Rulebook:
     # -- promotion --------------------------------------------------------
 
     def _rule(self, stat: RuleStat) -> Rule:
-        # adherence x log(evidence): a rule needs to work *and* recur. log1p
-        # keeps the ranking monotone and non-zero even if a caller drops
-        # ``min_evidence`` below 1, so an almost-empty book still orders sanely.
-        score = stat.adherence_rate * math.log1p(stat.evidence)
+        # A rule needs to work *and* recur, but recurrence may only count as
+        # much as the evidence earns: see _wilson_lower_bound for the failure
+        # the previous rate x log(evidence) product had.
+        score = _wilson_lower_bound(stat.adhered, stat.evidence)
         return Rule(
             detector=stat.detector,
             agent=stat.agent,
