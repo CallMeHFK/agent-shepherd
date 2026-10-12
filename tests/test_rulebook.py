@@ -436,7 +436,7 @@ def test_min_adherence_floor_keeps_ignored_nudges_out_of_the_book():
     assert rules[0].adherence == pytest.approx(0.8)
 
 
-def test_ranking_is_adherence_times_log_evidence():
+def test_ranking_prefers_the_recurring_rule_at_equal_adherence():
     """Equally reliable, but the recurring one is the rule worth the context."""
     book = _book_with(loop=(4, 1), contextrot=(8, 2))
     rules = book.rules(min_evidence=3, min_adherence=0.5)
@@ -855,3 +855,53 @@ def test_edited_path_recognizes_the_claude_edit_tools():
         "tool": {"name": "Edit", "input": {"file_path": "core/server.py"}},
     }
     assert rb._edited_path(rec) == "core/server.py"
+
+
+def test_a_short_perfect_record_outranks_a_long_mediocre_one():
+    """adherence x log1p(evidence) rewarded sample size, so 55/100 (2.54)
+    outranked 6/6 (1.95) -- a long mediocre record beating a short perfect
+    one is exactly the trade SAGE measures as a permanent regression."""
+    book = _book_with(perfect=(6, 0), mediocre=(55, 45))
+    rules = book.rules(min_evidence=3, min_adherence=0.5)
+    assert [r.detector for r in rules] == ["perfect", "mediocre"]
+
+
+def test_a_thin_perfect_record_still_beats_a_barely_passing_one():
+    """Same failure at the adherence floor: 20/40 scores 0.5*ln(41)=1.85 under
+    the old formula against 3/3's 1.0*ln(4)=1.39."""
+    book = _book_with(perfect=(3, 0), marginal=(20, 20))
+    rules = book.rules(min_evidence=3, min_adherence=0.5)
+    assert [r.detector for r in rules] == ["perfect", "marginal"]
+
+
+def test_ranking_score_is_a_rate_bounded_by_zero_and_one():
+    """The score is a conservative estimate of the adherence rate, so it lives
+    in [0, 1]. The old product did not: 4/5 scored 0.8*ln(6) = 1.43."""
+    for counts in ((4, 1), (8, 2), (20, 0), (1, 9), (55, 45)):
+        rule = _book_with(loop=counts).rules(min_evidence=1, min_adherence=0.0)[0]
+        assert 0.0 <= rule.score <= 1.0, (counts, rule.score)
+
+
+def test_more_adherence_at_the_same_sample_size_scores_higher():
+    book = Rulebook()
+    better = book._rule(_stat(nudges=10, adhered=7))
+    worse = book._rule(_stat(nudges=10, adhered=5))
+    assert better.score > worse.score
+
+
+def test_more_evidence_at_the_same_rate_scores_higher():
+    """Recurrence still matters -- but only as much as the evidence earns."""
+    book = Rulebook()
+    thick = book._rule(_stat(nudges=10, adhered=8))
+    thin = book._rule(_stat(nudges=5, adhered=4))
+    assert thick.score > thin.score
+
+
+def test_zero_evidence_scores_zero_instead_of_dividing():
+    book = Rulebook()
+    assert book._rule(_stat(nudges=0, adhered=0)).score == 0.0
+
+
+def _stat(*, nudges: int, adhered: int):
+    stat = RuleStat(detector="loop", agent="qwenpaw", nudges=nudges, adhered=adhered)
+    return stat
