@@ -527,6 +527,92 @@ def test_record_outcome_marks_inconclusive_samples():
 
 
 # ---------------------------------------------------------------------------
+# online judge feedback (self-evolution)
+# ---------------------------------------------------------------------------
+
+
+def test_judge_feedback_tallies_agreement_without_touching_behaviour():
+    book = _book_with(loop=(4, 0))
+    before = book.stats[("qwenpaw", "loop")]
+    book.note_judge_feedback("loop", agreed=True, agent="qwenpaw")
+    book.note_judge_feedback("loop", agreed=False, agent="qwenpaw")
+    stat = book.stats[("qwenpaw", "loop")]
+    assert (stat.judge_agree, stat.judge_disagree) == (1, 1)
+    assert stat.judge_evidence == 2
+    assert stat.judge_concordance == 0.5
+    # The behavioural record is exactly what it was: an opinion about past
+    # evidence must not masquerade as a new observation of the agent.
+    assert (stat.nudges, stat.adhered, stat.evidence) == (before.nudges, before.adhered, before.evidence)
+    assert stat.sessions == before.sessions
+
+
+def test_judge_feedback_resolves_aliases_like_the_adherence_channel():
+    book = Rulebook()
+    book.note_judge_feedback("near_duplicate", agreed=True, agent="claude")
+    assert book.stats[("claude", "loop")].judge_agree == 1
+
+
+def test_a_lone_judge_opinion_only_nudges_the_score():
+    """Shrinkage: one sample of either sign must not reorder a tested rule."""
+    book = _book_with(loop=(6, 0))
+    plain = book.rules()[0].score
+    book.note_judge_feedback("loop", agreed=False, agent="qwenpaw")
+    nudged = book.rules()[0].score
+    assert 0.0 < nudged < plain
+    assert plain - nudged < 0.25
+
+
+def test_judge_agreement_lifts_a_rule_above_its_peer():
+    """Two equally well-followed rules: the one the risk-gate-cut judge keeps
+    confirming is the better bet for the agent's scarce context. Three labels
+    each stay below the veto floor, so this is pure re-ranking."""
+    book = _book_with(loop=(6, 0), regression=(6, 0))
+    for _ in range(3):
+        book.note_judge_feedback("loop", agreed=True, agent="qwenpaw")
+        book.note_judge_feedback("regression", agreed=False, agent="qwenpaw")
+    rules = book.rules()
+    assert [r.detector for r in rules] == ["loop", "regression"]
+    assert rules[0].judge_concordance == 1.0
+    assert rules[0].score > rules[1].score
+
+
+def test_a_consistently_rejected_rule_is_vetoed_from_promotion():
+    """The self-evolution end state: agents may have complied, but the Tier 1
+    scorer through the risk gate keeps saying these fires were not real, so
+    after enough samples the rule never reaches the agent's context again."""
+    book = _book_with(loop=(8, 0))
+    for _ in range(5):
+        book.note_judge_feedback("loop", agreed=False, agent="qwenpaw")
+    assert book.rules() == []
+    # ...and a thin disagreement record only re-ranks, it never vetoes.
+    thin = _book_with(loop=(8, 0))
+    for _ in range(3):
+        thin.note_judge_feedback("loop", agreed=False, agent="qwenpaw")
+    assert [r.detector for r in thin.rules()] == ["loop"]
+
+
+def test_a_consistently_confirmed_rule_outranks_an_unjudged_equal():
+    book = _book_with(loop=(6, 0), drift=(6, 0))
+    for _ in range(12):
+        book.note_judge_feedback("loop", agreed=True, agent="qwenpaw")
+    rules = book.rules()
+    assert [r.detector for r in rules] == ["loop", "drift"]
+    assert rules[0].judge_evidence == 12
+    assert rules[0].score > rules[1].score
+    assert rules[1].judge_evidence == 0
+
+
+def test_judge_counters_survive_the_json_round_trip():
+    book = _book_with(loop=(4, 0))
+    book.note_judge_feedback("loop", agreed=True, agent="qwenpaw")
+    book.note_judge_feedback("loop", agreed=False, agent="qwenpaw")
+    restored = Rulebook.from_dict(json.loads(json.dumps(book.to_dict())))
+    stat = restored.stats[("qwenpaw", "loop")]
+    assert (stat.judge_agree, stat.judge_disagree) == (1, 1)
+    assert restored.rules() == book.rules()
+
+
+# ---------------------------------------------------------------------------
 # rendered header
 # ---------------------------------------------------------------------------
 

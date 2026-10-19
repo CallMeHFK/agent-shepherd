@@ -17,6 +17,11 @@ reviewer is asleep while the agent is healthy. A verdict is admitted through a
 risk gate fitted from observed outcomes, not through whatever confidence the
 judge self-reported.
 
+That same gate is also the teacher. Every Tier 0 nudge that reached the agent is
+labelled by the next Tier 1 review against the gate's current line — reinforce
+on agreement, demote on disagreement — so the house rules the agent reads at
+prompt start evolve from Tier 1 scoring instead of from compliance alone.
+
 It supervises **QwenPaw**, **Claude Code** and **Codex**, appends an auditable
 ledger of everything it saw, and ships an offline counterfactual benchmark so
 "is it worth its cost?" is a command you can run rather than a claim in a README.
@@ -70,11 +75,12 @@ flowchart LR
     E -->|"block / escalate"| G["only for an agent that opted in<br/>block_enabled: true"]
     B --> H[("append-only ledger<br/>~/.shepherd/sessions/&lt;agent&gt;/&lt;session&gt;.jsonl")]
     F -.->|"followed repeatedly"| I["house-rules header<br/>injected at prompt start"]
+    E -.->|"each review labels the Tier 0 nudges it covered:<br/>score clearing the fitted line → reinforce,<br/>falling short → demote"| I
     I -.-> A
     A -.->|"daemon unreachable → fail open"| Z
 ```
 
-Three edges in that picture are the design:
+Four edges in that picture are the design:
 
 * **Fail open.** An unreachable supervisor is invisible, never fatal. No adapter
   call to the daemon is allowed to raise, and hooks are built so a crash on the
@@ -86,6 +92,11 @@ Three edges in that picture are the design:
 * **Evidence spends the budget.** The judge is woken at natural checkpoints and,
   mid-iteration, only as the drift statistic climbs toward its alarm line — never
   on a schedule.
+* **The tiers supervise each other.** The risk gate already decides whether a
+  judge verdict is admitted; that same fitted line now labels every Tier 0 nudge
+  that reached the agent, so the rulebook evolves on Tier 1 agreement instead of
+  on compliance alone. Behaviour answers "was it followed?", Tier 1 answers "was
+  it right?" — a rule only survives both.
 
 ## What it catches
 
@@ -109,6 +120,7 @@ Cross-cutting machinery that is not a detector but changes what you experience:
 | wake gate | clean iteration boundaries are not reviewed at all, because measured cost was ~23 % of all events waking a judge on healthy sessions | `review_clean_iterations` |
 | admission | the two score thresholds are priors until enough labelled outcomes accumulate, then conformal risk control replaces them with a finite-sample fit; a key with too little evidence is dropped rather than pinned to a fallback | `nudge_threshold`, `block_threshold`, `risk_target_fpr`, `risk_min_samples` |
 | rulebook | guidance the agent demonstrably followed is promoted into a short header at prompt start instead of re-nagged mid-run | `rulebook_enabled`, `rulebook_budget_tokens` |
+| self-evolution | every Tier 0 nudge that reached the agent is labelled online by the next Tier 1 review — agreed when the judge's drift score clears the risk gate's admission line, disagreed otherwise. Agreement reinforces the rule in the ranking, repeated disagreement demotes it and (past 4 labelled windows under 50 % concordance) vetoes it from promotion | `rulebook_judge_feedback` |
 
 The derivations, the papers behind them and the negative results are in
 [RESEARCH_NOTES.md](RESEARCH_NOTES.md).
@@ -245,6 +257,7 @@ policy:
   risk_min_samples: 20
   rulebook_enabled: true
   rulebook_budget_tokens: 160
+  rulebook_judge_feedback: true # Tier 1 scores + risk gate evolve the rulebook online
 agents:
   qwenpaw: {enabled: true, block_enabled: false}
   claude:  {enabled: true, block_enabled: false}

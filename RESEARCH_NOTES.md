@@ -370,11 +370,16 @@ differ at `LoopDetector`'s own near-duplicate bar and the offending call must no
 return in-window; for `regression`/`offspec`/`binding`, the offending tool or path
 must go untouched while other work happens; for `contextrot`, any tool call counts.
 A detector that fires again in-window voids the sample (a nudge the agent ignored
-is not evidence that it works). Rules are ranked by adherence x log1p(evidence)
-with an evidence floor (superseded — see entry 30: the ranking score is now a
-Wilson lower bound on the adherence rate), rendered into a token-budgeted
-header, injected at
-`PROMPT_SUBMIT`, and re-learned from the finished ledger at `STOP`. The rulebook
+is not evidence that it works). Rules are ranked by a **Wilson lower bound on the
+adherence rate** (`_wilson_lower_bound` in `core/rules/rulebook.py`), rendered
+into a token-budgeted header, injected at `PROMPT_SUBMIT`, and re-learned from
+the finished ledger at `STOP`. Since entry 32 the book also learns *online*, and
+the ranking score blends a second, shrinkage-weighted Wilson bound over Tier 1
+agreement with the behavioural one: each Tier 0 nudge that reached the agent is
+labelled by the following Tier 1 review — agreed when the judge's drift score
+clears the risk model's current admission line, disagreed when it does not — so a
+rule has to survive both behaviour ("was it followed?") and Tier 1 ("was it
+right?"). The rulebook
 file lives beside the ledger, so a test or benchmark pointed at a temp ledger
 cannot write into the user's config directory.
 
@@ -438,9 +443,11 @@ into a rule — only the fixed detector texts are.
    Details and grading in the fourth sweep.
 9. **Paired statistical acceptance gate for the three self-improvement loops**
    — SAGE (<https://arxiv.org/abs/2609.36043>, see the fifth sweep below):
-   replace the rulebook's aggregate promotion score
-   (`adherence_rate * log1p(evidence)`, `rulebook.py:885`) with per-item paired
-   evaluation on the `shepherd eval` corpus plus an exact one-sided binomial
+   replace the rulebook's *aggregate* promotion score (then
+   `adherence_rate * log1p(evidence)`; since replaced by a Wilson lower bound on
+   the adherence rate blended with Tier 1 agreement, entries 30 and 32 — SAGE's
+   objection to it is unchanged) with a per-item paired evaluation on the
+   `shepherd eval` corpus plus an exact one-sided binomial
    (McNemar) commit test, and later run `risk.py` threshold refits through the
    same gate. Stdlib-only, offline, promotion-time cost. Graded P0/P1/P2 in
    entry 27.
@@ -1004,9 +1011,11 @@ Why it wins on each constraint:
   adherence statistics from the ledger) and replace only the promotion rule.
 - **The gate cannot be gamed by the thing it gates.** The gate is integer
   arithmetic over per-item paired outcomes on a corpus the promoted artifact
-  has no write access to. Contrast: the current promotion score
-  `adherence_rate * log1p(evidence)` (`rulebook.py:885`) is exactly the naive
-  aggregate gate SAGE refutes — a rule that raises average adherence while
+  has no write access to. Contrast: the promotion score is an aggregate
+  quantity — then `adherence_rate * log1p(evidence)`, now a Wilson lower bound
+  on the adherence rate blended with the Tier 1 agreement rate (entries 30, 32)
+  — and it is exactly the naive aggregate gate SAGE refutes: a rule that raises
+  average adherence while
   silencing a detector on the fault classes it happens to mention promotes
   itself, and with per-(detector, agent) nudge counts as small as ours, the
   Optimizer's Curse is not hypothetical. WVV's collapse result (entry 26) says
@@ -1070,9 +1079,10 @@ that shipped is entry 30's.)*
   per-item win/loss/regression ledger; commit only on Δ_λ > 0 ∧ exact
   one-sided binomial p_λ(w,ℓ) < α ∧ ρ ≤ τ, with λ > 1 (losing a previously
   caught fault is worse than failing to bank a marginal adherence gain) and
-  abstention when there are no discordant pairs. Keep
-  `adherence × log1p(evidence)` for *ranking* under the token budget; the gate
-  decides *admission*. Offline, deterministic, free, ~20 lines of stdlib.
+  abstention when there are no discordant pairs. Keep today's score
+  (`_wilson_lower_bound`, plus the Tier 1 agreement blend of entry 32) for
+  *ranking* under the token budget; the gate decides *admission*. Offline,
+  deterministic, free, ~20 lines of stdlib.
   Negative controls: a corpus-overfitting fake rule must be rejected; an
   empty candidate must abstain, not commit.
 - **P1 — canary cases + paired non-evolving baseline.** Add eval scenarios
@@ -1214,9 +1224,10 @@ sits in the *ranking* score, not in a missing acceptance test.
 **What survives, and what shipped.**
 
 - **P0 (shipped) — replace the ranking score with a Wilson lower bound.**
-  `adherence_rate * log1p(evidence)` (`core/rules/rulebook.py:885`) multiplies
-  a rate by a function of the sample size, so a long mediocre record outranks
-  a short perfect one: 55/100 scores 0.55·ln(101) = 2.54 while 6/6 scores
+  The score being replaced was `adherence_rate * log1p(evidence)`
+  (`core/rules/rulebook.py`, in `Rulebook._rule` before this change): a rate
+  times a function of the sample size, so a long mediocre record outranks a
+  short perfect one — 55/100 scores 0.55·ln(101) = 2.54 while 6/6 scores
   1.0·ln(7) = 1.95. The Wilson lower bound on the adherence rate discounts a
   rate by how little evidence backs it, keeps recurrence mattering, needs no
   α/τ/λ, no corpus and no new dependency (`math.sqrt`). Honest framing: this
@@ -1315,3 +1326,66 @@ assignment, multi-view progress scoring, tool-call-rate steering, judge window
 assembly, per-agent eval breakdowns, ambiguity-aware `UNKNOWN` guidance),
 follow-up 8 (AFTraj as an external label corpus), and entry 23's
 injection-outcome verification and trajectory-grouped splits.
+
+### 32. Self-evolution: Tier 1 scoring and the risk gate update the Tier 0 rulebook online
+
+Every Tier 1 review produced two numbers that were thrown away. The judge's
+drift score went to `RiskModel.observe` so its own admission line could be
+refit; Tier 0's nudge order went nowhere. Yet the two are a matched pair: a
+review scores the window that follows a Tier 0 fire, and the risk gate has
+already decided what score counts as real drift. Recording that verdict against
+the rule that fired closes the loop — Tier 0 stops being a fixed asset that the
+rest of the supervisor learns *about*, and starts being updated by it.
+
+**What shipped.** `PolicyEngine` now keeps the detectors whose nudges actually
+reached the agent since the last review (`SessionState.tier0_pending`), and
+`_feed_rulebook` labels each one when the next review lands: **agreed** when the
+review's confidence clears `risk.threshold_for("<agent>:judge")` — the same
+fitted line that decides whether the judge's own nudge is injected — and
+**disagreed** otherwise. `Rulebook.note_judge_feedback` accumulates both into
+per-(agent, detector) counters (persisted schema bumped to v2), and
+`Rulebook._rule` blends a second Wilson lower bound over the agreement rate into
+the ranking score with shrinkage weight `judge_evidence / (judge_evidence + 4)`,
+so one opinion moves a rule by at most a fifth while a long concordant or
+discordant record moves it decisively. Past `MIN_JUDGE_EVIDENCE` (4) labelled
+windows below `MIN_JUDGE_CONCORDANCE` (0.5), the rule is vetoed from promotion
+outright, however well agents happened to comply. Behaviour answers "was it
+followed?"; Tier 1 answers "was it right?".
+
+**Two choices worth defending.** *Why the risk line and not a new constant:*
+the cut-point is already calibrated per (agent, source) with a finite-sample
+correction and already falls back to the configured prior when evidence is thin
+(`core/judge/risk.py`, `refit`), so this introduces no second arbitrary
+threshold and inherits an honest cold start. Any score the gate would have
+rejected is, by construction, below what this system believes counts as drift —
+using anything looser would let the judge rubber-stamp Tier 0 with numbers it
+itself refuses to act on. *Why veto requires evidence:* the judge evaluates a
+window for drift, not the validity of the rule that fired in it, and it is a
+frozen model with its own biases — so below four labels the channel only
+re-ranks, never excludes. A single opinion cannot silence a detector; a
+sustained pattern can. A fail-open `judge unavailable` PASS labels nothing at
+all, because an outage is not an opinion.
+
+**Honest limits.** This is a **weak label**, exactly like the tier0-confirmed
+tag that already trains the risk model: it is a correlation between two
+mechanisms sharing one frame, not ground truth, and if both are wrong in the
+same direction the loop reinforces the mistake. Nothing here prevents that;
+entry 27's corpus-anchored paired acceptance gate is still the missing piece,
+and it stays missing for the reason entry 30 found — the `shepherd eval` corpus
+cannot react to rule *content*, and `default_config` disables the rulebook
+outright (`eval/harness.py:58-60`). So this loop is deliberately *not*
+benchmark-verified: what is tested is its mechanism (agreed/disagreed counts,
+persistence, the disabled switch, the outage path), not that it improves F1.
+What it does not touch matters too: no detector parameter, threshold, or line of
+guidance text is rewritten — only ranks and admission of existing rules — so the
+tampering-lineage findings and the whole code-branch exclusion of entry 27
+(compiling a rulebook into executable logic) do not apply.
+
+**Tests.** `test_a_confirmed_judge_review_reinforces_the_tier0_rule_online` and
+its disagreement twin cover both labels end to end through the real engine;
+`test_rulebook_judge_feedback_can_be_disabled` covers the switch;
+`test_a_judge_outage_labels_nothing` proves an outage costs Tier 0 nothing;
+`test_a_lone_judge_opinion_only_nudges_the_score` pins the shrinkage (one
+sample moves the score < 0.25); and `test_a_consistently_rejected_rule_is_vetoed_from_promotion`
+ships with the thin-evidence counter-example (three disagreements re-rank, they
+do not veto) so the veto cannot silently tighten.

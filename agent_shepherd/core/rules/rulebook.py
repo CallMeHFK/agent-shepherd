@@ -76,8 +76,25 @@ MIN_LINE_TOKENS = 8
 #: in the session *path*, not in the record.
 UNKNOWN_AGENT = "unknown"
 #: Bumped when the persisted shape changes; a stale file is ignored, not migrated.
-SCHEMA_VERSION = 1
+#: v2 added the judge-concordance counters (``judge_agree`` / ``judge_disagree``).
+SCHEMA_VERSION = 2
 RULEBOOK_FILENAME = "rulebook.json"
+
+#: Shrinkage prior for the judge-concordance channel. A rule's score blends its
+#: behavioural evidence (did the agent follow) with its judge evidence (did the
+#: Tier 1 scorer, admitted through the risk gate, agree the situation was real);
+#: the weight of the judge channel is ``judge_evidence / (judge_evidence + this)``.
+#: 4 means a single judge opinion moves the score by at most a fifth — the same
+#: "a flimsy sample must not outrank a tested record" logic the Wilson bound
+#: applies to adherence, applied to concordance.
+JUDGE_SHRINKAGE = 4.0
+#: Judge samples required before a rule's concordance can *exclude* it from
+#: promotion. Below this the judge channel only re-ranks, never vetoes.
+MIN_JUDGE_EVIDENCE = 4
+#: A rule the judge (as admitted by the risk gate) disagrees with more often
+#: than not, over enough samples, does not belong in the agent's up-front
+#: context even if agents have been following it.
+MIN_JUDGE_CONCORDANCE = 0.5
 
 # ``_EDIT_TOOLS`` comes from detectors.py (imported above): what counts as an
 # edit for the detector and what counts as an edit for adherence judging must
@@ -640,6 +657,13 @@ class RuleStat:
     last_seen_ts: float = 0.0
     inconclusive: int = 0
     sessions: list[str] = field(default_factory=list)
+    # Online judge feedback (the self-evolution channel): how the Tier 1 scorer,
+    # cut by the risk gate's admission line, labelled the windows in which this
+    # detector's nudge actually reached the agent. Kept separate from the
+    # adherence counters so a judge opinion can re-rank a rule without
+    # pretending the agent's behaviour was something it was not.
+    judge_agree: int = 0
+    judge_disagree: int = 0
 
     @property
     def evidence(self) -> int:
@@ -648,6 +672,19 @@ class RuleStat:
     @property
     def adherence_rate(self) -> float:
         return self.adhered / self.evidence if self.evidence else 0.0
+
+    @property
+    def judge_evidence(self) -> int:
+        return self.judge_agree + self.judge_disagree
+
+    @property
+    def judge_concordance(self) -> float:
+        return self.judge_agree / self.judge_evidence if self.judge_evidence else 0.0
+
+    @property
+    def judge_wilson(self) -> float:
+        """Conservative lower bound on the judge-concordance rate."""
+        return _wilson_lower_bound(self.judge_agree, self.judge_evidence)
 
     @property
     def mean_steps_to_recovery(self) -> float:
@@ -678,6 +715,18 @@ class RuleStat:
             self.sessions.append(session_id)
             self.sessions.sort()
 
+    def record_judge(self, *, agreed: bool, ts: float = 0.0) -> None:
+        """Record one online judge verdict about this rule's window.
+
+        Judge feedback deliberately does not touch ``sessions`` or
+        ``last_seen_ts``: it is an opinion about evidence that already exists,
+        not a new observation of the agent.
+        """
+        if agreed:
+            self.judge_agree += 1
+        else:
+            self.judge_disagree += 1
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "detector": self.detector,
@@ -688,6 +737,8 @@ class RuleStat:
             "last_seen_ts": self.last_seen_ts,
             "inconclusive": self.inconclusive,
             "sessions": list(self.sessions),
+            "judge_agree": self.judge_agree,
+            "judge_disagree": self.judge_disagree,
         }
 
     @classmethod
@@ -705,6 +756,8 @@ class RuleStat:
             last_seen_ts=_float(data.get("last_seen_ts")),
             inconclusive=_nonneg_int(data.get("inconclusive")),
             sessions=_str_list(sessions),
+            judge_agree=_nonneg_int(data.get("judge_agree")),
+            judge_disagree=_nonneg_int(data.get("judge_disagree")),
         )
 
 
@@ -770,6 +823,8 @@ class Rule:
     mean_steps_to_recovery: float
     sessions_observed: int
     score: float
+    judge_evidence: int = 0
+    judge_concordance: float = 0.0
 
     def render_line(self) -> str:
         return (
@@ -830,6 +885,29 @@ class Rulebook:
             inconclusive=inconclusive,
             session_id=session_id,
             ts=time.time() if ts is None else float(ts),
+        )
+
+    def note_judge_feedback(
+        self,
+        detector: str,
+        *,
+        agreed: bool,
+        agent: Agent | str = UNKNOWN_AGENT,
+        ts: float | None = None,
+    ) -> None:
+        """Feed one online Tier 1 / risk-gate label to a rule's scorecard.
+
+        This is the self-evolution seam: when the judge reviews a window in
+        which this detector's nudge actually reached the agent, its drift score
+        cut by the risk gate's admission line says whether the fire was
+        on-target. Agreement reinforces the rule; repeated disagreement demotes
+        and eventually (past :data:`MIN_JUDGE_EVIDENCE` samples under
+        :data:`MIN_JUDGE_CONCORDANCE`) excludes it from promotion. Behavioural
+        adherence stays the primary evidence; this channel only reshapes the
+        ranking and can veto a rule the judge consistently rejects.
+        """
+        self._stat(_norm_name(detector) or "unknown", _agent_value(agent)).record_judge(
+            agreed=bool(agreed), ts=_float(ts)
         )
 
     def _closed(self, stream: Sequence[Mapping[str, Any]], index: int) -> bool:
@@ -910,7 +988,15 @@ class Rulebook:
         # A rule needs to work *and* recur, but recurrence may only count as
         # much as the evidence earns: see _wilson_lower_bound for the failure
         # the previous rate x log(evidence) product had.
-        score = _wilson_lower_bound(stat.adhered, stat.evidence)
+        adherence_score = _wilson_lower_bound(stat.adhered, stat.evidence)
+        # The judge channel (Tier 1 scores cut by the risk gate) reshapes the
+        # same score with evidence-shrunk weight: a lone judge opinion moves a
+        # rule by a fraction, a long concordant or discordant record moves it
+        # decisively. With no judge evidence the score is the behavioural one,
+        # unchanged.
+        judge_score = stat.judge_wilson
+        weight = stat.judge_evidence / (stat.judge_evidence + JUDGE_SHRINKAGE)
+        score = (1.0 - weight) * adherence_score + weight * judge_score
         return Rule(
             detector=stat.detector,
             agent=stat.agent,
@@ -921,6 +1007,8 @@ class Rulebook:
             mean_steps_to_recovery=stat.mean_steps_to_recovery,
             sessions_observed=stat.sessions_observed,
             score=round(score, 6),
+            judge_evidence=stat.judge_evidence,
+            judge_concordance=round(stat.judge_concordance, 6),
         )
 
     def rules(
@@ -937,6 +1025,12 @@ class Rulebook:
         poorly-followed detector never gets in. When ``agent`` is None the best
         entry per detector wins, so a shared header never says the same rule
         twice.
+
+        The judge channel can also *veto*: once a rule carries at least
+        :data:`MIN_JUDGE_EVIDENCE` online labels and the risk-gate-cut Tier 1
+        scores disagreed more often than not, the rule is held back no matter
+        how often agents happened to comply. Below that sample count the judge
+        channel only reshapes the ranking, never the admission.
         """
         wanted = _agent_value(agent) if agent is not None else None
         best: dict[str, Rule] = {}
@@ -944,6 +1038,11 @@ class Rulebook:
             if wanted is not None and stat.agent != wanted:
                 continue
             if stat.evidence < min_evidence or stat.adherence_rate < min_adherence:
+                continue
+            if (
+                stat.judge_evidence >= MIN_JUDGE_EVIDENCE
+                and stat.judge_concordance < MIN_JUDGE_CONCORDANCE
+            ):
                 continue
             rule = self._rule(stat)
             current = best.get(rule.detector)
