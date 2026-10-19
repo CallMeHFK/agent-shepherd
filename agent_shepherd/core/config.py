@@ -146,6 +146,12 @@ class PolicyConfig:
     # front instead of re-nagging it mid-run (arXiv 2509.03990).
     rulebook_enabled: bool = True
     rulebook_budget_tokens: int = 160
+    # Self-evolution: let Tier 1 scores (cut by the risk gate's admission line)
+    # feed back into the rulebook online. A judge window that clears the gate
+    # reinforces the Tier 0 rule whose nudge preceded it; one that does not,
+    # weakens it — and a rule the judge consistently rejects stops being
+    # promoted into the header.
+    rulebook_judge_feedback: bool = True
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> PolicyConfig:
@@ -177,6 +183,7 @@ class PolicyConfig:
             risk_min_samples=int(data.get("risk_min_samples", 20)),
             rulebook_enabled=bool(data.get("rulebook_enabled", True)),
             rulebook_budget_tokens=int(data.get("rulebook_budget_tokens", 160)),
+            rulebook_judge_feedback=bool(data.get("rulebook_judge_feedback", True)),
         )
 
 
@@ -267,6 +274,7 @@ class ShepherdConfig:
                 "risk_min_samples": 20,
                 "rulebook_enabled": True,
                 "rulebook_budget_tokens": 160,
+                "rulebook_judge_feedback": True,
             },
             "agents": {
                 "qwenpaw": {"enabled": True, "block_enabled": False},

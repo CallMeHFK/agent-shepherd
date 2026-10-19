@@ -17,6 +17,11 @@ reviewer is asleep while the agent is healthy. A verdict is admitted through a
 risk gate fitted from observed outcomes, not through whatever confidence the
 judge self-reported.
 
+That same gate is also the teacher. Every Tier 0 nudge that reached the agent is
+labelled by the next Tier 1 review against the gate's current line — reinforce
+on agreement, demote on disagreement — so the house rules the agent reads at
+prompt start evolve from Tier 1 scoring instead of from compliance alone.
+
 It supervises **QwenPaw**, **Claude Code** and **Codex**, appends an auditable
 ledger of everything it saw, and ships an offline counterfactual benchmark so
 "is it worth its cost?" is a command you can run rather than a claim in a README.
@@ -30,6 +35,7 @@ ledger of everything it saw, and ships an offline counterfactual benchmark so
 - [Audit and replay](#audit-and-replay)
 - [Measuring it](#measuring-it)
 - [Running it as a service](#running-it-as-a-service)
+- [Uninstalling](#uninstalling)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 
@@ -56,6 +62,9 @@ Tier 0 needs no model and no key: with no judge reachable, the detectors still
 run and the benchmark still scores them (that is exactly what CI does). Adding a
 judge buys the second tier — see [Judge backends](#judge-backends).
 
+To take it all off again later: `shepherd uninstall all` — one command, no
+hand-editing, see [Uninstalling](#uninstalling).
+
 ## How it works
 
 ```mermaid
@@ -70,11 +79,12 @@ flowchart LR
     E -->|"block / escalate"| G["only for an agent that opted in<br/>block_enabled: true"]
     B --> H[("append-only ledger<br/>~/.shepherd/sessions/&lt;agent&gt;/&lt;session&gt;.jsonl")]
     F -.->|"followed repeatedly"| I["house-rules header<br/>injected at prompt start"]
+    E -.->|"each review labels the Tier 0 nudges it covered:<br/>score clearing the fitted line → reinforce,<br/>falling short → demote"| I
     I -.-> A
     A -.->|"daemon unreachable → fail open"| Z
 ```
 
-Three edges in that picture are the design:
+Four edges in that picture are the design:
 
 * **Fail open.** An unreachable supervisor is invisible, never fatal. No adapter
   call to the daemon is allowed to raise, and hooks are built so a crash on the
@@ -86,6 +96,11 @@ Three edges in that picture are the design:
 * **Evidence spends the budget.** The judge is woken at natural checkpoints and,
   mid-iteration, only as the drift statistic climbs toward its alarm line — never
   on a schedule.
+* **The tiers supervise each other.** The risk gate already decides whether a
+  judge verdict is admitted; that same fitted line now labels every Tier 0 nudge
+  that reached the agent, so the rulebook evolves on Tier 1 agreement instead of
+  on compliance alone. Behaviour answers "was it followed?", Tier 1 answers "was
+  it right?" — a rule only survives both.
 
 ## What it catches
 
@@ -109,6 +124,7 @@ Cross-cutting machinery that is not a detector but changes what you experience:
 | wake gate | clean iteration boundaries are not reviewed at all, because measured cost was ~23 % of all events waking a judge on healthy sessions | `review_clean_iterations` |
 | admission | the two score thresholds are priors until enough labelled outcomes accumulate, then conformal risk control replaces them with a finite-sample fit; a key with too little evidence is dropped rather than pinned to a fallback | `nudge_threshold`, `block_threshold`, `risk_target_fpr`, `risk_min_samples` |
 | rulebook | guidance the agent demonstrably followed is promoted into a short header at prompt start instead of re-nagged mid-run | `rulebook_enabled`, `rulebook_budget_tokens` |
+| self-evolution | every Tier 0 nudge that reached the agent is labelled online by the next Tier 1 review — agreed when the judge's drift score clears the risk gate's admission line, disagreed otherwise. Agreement reinforces the rule in the ranking, repeated disagreement demotes it and (past 4 labelled windows under 50 % concordance) vetoes it from promotion | `rulebook_judge_feedback` |
 
 The derivations, the papers behind them and the negative results are in
 [RESEARCH_NOTES.md](RESEARCH_NOTES.md).
@@ -134,7 +150,8 @@ Installing any adapter is conservative: the previous `settings.json` /
 `hooks.json` is copied to a timestamped `.bak` first, an unparseable existing
 file is refused rather than replaced, foreign hook groups are left alone, and a
 previous QwenPaw bundle is moved to `~/.qwenpaw/plugin-archive/` instead of
-being deleted.
+being deleted. `shepherd uninstall` keeps the same posture in reverse — see
+[Uninstalling](#uninstalling).
 
 ### Import the bundle from a release instead of a checkout
 
@@ -245,6 +262,7 @@ policy:
   risk_min_samples: 20
   rulebook_enabled: true
   rulebook_budget_tokens: 160
+  rulebook_judge_feedback: true # Tier 1 scores + risk gate evolve the rulebook online
 agents:
   qwenpaw: {enabled: true, block_enabled: false}
   claude:  {enabled: true, block_enabled: false}
@@ -307,7 +325,7 @@ to be right.
 shepherd start              # foreground
 shepherd start-bg           # detached; writes ~/.shepherd/daemon.pid and daemon.log
 shepherd status             # up / down — down means supervision is silently failing open
-shepherd stop               # SIGTERM the start-bg process
+shepherd stop               # works however the daemon was started
 ```
 
 For a machine that should always be supervising, a systemd user unit ships with
@@ -320,9 +338,40 @@ install -Dm644 packaging/shepherd.service ~/.config/systemd/user/shepherd.servic
 systemctl --user daemon-reload && systemctl --user enable --now shepherd
 ```
 
+`shepherd stop` stops whichever daemon is actually serving: the `start-bg`
+pidfile when there is one, otherwise it asks `/health`, which reports the
+daemon's own pid and who owns it. A unit-managed daemon goes through
+`systemctl --user stop shepherd`, because the shipped unit restarts on a bare
+SIGTERM — signalling it directly would leave the machine supervised again two
+seconds later.
+
 The first start pays the drift detector's Monte-Carlo threshold fit (a few
 seconds) before it binds; the result is cached in
 `~/.shepherd/cusum_thresholds.json`, so later starts bind immediately.
+
+## Uninstalling
+
+One command, per direction — no hand-editing another tool's JSON, no hunting
+for the daemon process:
+
+```bash
+shepherd uninstall claude       # or: codex | qwenpaw | all
+shepherd uninstall all --purge  # also deletes ~/.shepherd: config, ledger, rulebook, thresholds
+shepherd uninstall all --dry-run  # show what would go, change nothing
+```
+
+Uninstall removes exactly what `shepherd install` wrote. Foreign hooks,
+settings and plugins are left alone; every edit is backed up to a timestamped
+`.bak` first; and a config file that carried nothing but ours is deleted rather
+than left as an empty husk. The QwenPaw bundle is *moved* to
+`~/.qwenpaw/plugin-archive/` (same place install keeps previous versions), never
+deleted. When no adapter remains, the daemon is stopped for you — otherwise it
+would sit there with nothing posting to it, or worse, a systemd unit would keep
+restarting it.
+
+`--purge` is the only destructive step, and it is opt-in by name: it deletes
+`~/.shepherd`, which is the session ledger, the learned rulebook, the fitted
+thresholds and your config. Without it those survive an adapter uninstall.
 
 ## Troubleshooting
 
@@ -334,6 +383,7 @@ seconds) before it binds; the result is cached in
 | `codex exec` shows no supervision | untrusted hooks are skipped without warning; pass `--dangerously-bypass-hook-trust` |
 | Hook calls raise `ImportError` about SOCKS | proxy environment leaking into loopback calls; daemon calls must use `trust_env=False` |
 | A config edit does nothing | `shepherd config show` — the `source` column says whether a `file` key is being overridden by an `env:` one, and `doctor` flags keys this release no longer reads |
+| Supervision continues after uninstalling one agent | by design: the daemon stays for the adapters that remain. `shepherd uninstall all` stops it, and a systemd unit is stopped through systemctl so `Restart=always` cannot bring it back |
 
 ## Development
 

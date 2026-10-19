@@ -63,3 +63,28 @@ def write_json(path: Path, data: dict) -> Path | None:
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
     return saved
+
+
+def strip_hook_entries(hooks: dict, marker: str) -> bool:
+    """Remove every entry mentioning ``marker`` from each event bucket.
+
+    Buckets that end up empty are dropped along with their event key, so an
+    uninstall leaves no shepherd-shaped husk in somebody else's config — the
+    same "only ours, and all of it" rule the installers follow when they
+    replace legacy entries. Returns whether anything changed.
+    """
+    if not isinstance(hooks, dict):
+        return False
+    changed = False
+    for event in list(hooks):
+        bucket = hooks[event]
+        if not isinstance(bucket, list):
+            continue
+        kept = [entry for entry in bucket if marker not in json.dumps(entry)]
+        if len(kept) != len(bucket):
+            changed = True
+        if kept:
+            hooks[event] = kept
+        else:
+            del hooks[event]
+    return changed

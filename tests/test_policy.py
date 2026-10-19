@@ -9,7 +9,7 @@ import pytest
 from agent_shepherd.core.config import JudgeConfig, PolicyConfig, ShepherdConfig
 from agent_shepherd.core.ledger import Ledger
 from agent_shepherd.core.server import PolicyEngine
-from agent_shepherd.core.types import Agent, AgentEvent, EventType, VerdictAction
+from agent_shepherd.core.types import Agent, AgentEvent, EventType, Verdict, VerdictAction
 
 
 class FakeScorer:
@@ -746,3 +746,117 @@ def test_disabled_agent_is_not_supervised(tmp_path):
     assert verdict.action == VerdictAction.PASS
     assert scorer.calls == 0, "a disabled agent must never reach the judge"
     assert engine.stats(Agent.CLAUDE, "off") == {}, "a disabled agent keeps no session state"
+
+
+# ---------------------------------------------------------------------------
+# self-evolution: Tier 1 scores + risk gate feed the Tier 0 rulebook online
+# ---------------------------------------------------------------------------
+
+
+def _loop_call(i: int, session_id: str = "evolve"):
+    from agent_shepherd.core.types import ToolCall
+
+    return AgentEvent(
+        agent=Agent.QWENPAW,
+        session_id=session_id,
+        event=EventType.TOOL_CALL,
+        ts=1_000.0 + i * 600.0,  # spaced past the nudge cooldown
+        iteration=i,
+        tool=ToolCall(name="shell", input={"cmd": "echo hi"}),
+    )
+
+
+def _gate(i: int, session_id: str = "evolve", ts: float | None = None):
+    return AgentEvent(
+        agent=Agent.QWENPAW,
+        session_id=session_id,
+        event=EventType.ITERATION_END,
+        ts=ts if ts is not None else 1_000.0 + i * 600.0,
+        iteration=i,
+    )
+
+
+def test_a_confirmed_judge_review_reinforces_the_tier0_rule_online(tmp_path):
+    """A Tier 0 nudge that reaches the agent, then a judge window whose drift
+    score clears the risk gate's admission line: the rulebook's scorecard is
+    updated (and persisted) during the session, not only at STOP."""
+    from agent_shepherd.core.rules.rulebook import Rulebook
+
+    engine, scorer = _engine_and_scorer(str(tmp_path / "ledger"))
+    scorer.verdict = Verdict(
+        action=VerdictAction.NUDGE, reason="drift", guidance="fix it", confidence=0.9, detector="judge"
+    )
+
+    for i in range(3):
+        engine.process(_loop_call(i))
+    engine.take_pending_verdict(Agent.QWENPAW, "evolve")  # the parked nudge drains at the gate
+    engine.process(_gate(3))  # this gate wakes the judge on the loop window
+
+    stat = engine.rulebook.stats[("qwenpaw", "loop")]
+    assert stat.judge_agree == 1 and stat.judge_disagree == 0
+    # 0.9 clears the configured prior (0.60): the same cut the admission gate uses.
+    assert engine.risk.threshold_for("qwenpaw:judge") == 0.60
+    # Online means persisted: a restart sees the same reinforcement.
+    restored = Rulebook.load(engine.rulebook_path)
+    assert restored.stats[("qwenpaw", "loop")].judge_agree == 1
+
+
+def test_a_below_gate_judge_score_disagrees_with_the_tier0_nudge(tmp_path):
+    """The risk gate is the arbiter: a judge review that would not even have
+    been admitted counts *against* the rule that fired, so a detector that
+    keeps crying wolf loses its promoted slot instead of keeping it forever."""
+    from agent_shepherd.core.rules.rulebook import Rulebook
+
+    engine, scorer = _engine_and_scorer(str(tmp_path / "ledger"))
+    scorer.verdict = Verdict(
+        action=VerdictAction.NUDGE, reason="weak", guidance="maybe", confidence=0.2, detector="judge"
+    )
+
+    for i in range(3):
+        engine.process(_loop_call(i, "weak"))
+    engine.take_pending_verdict(Agent.QWENPAW, "weak")
+    engine.process(_gate(3, "weak"))
+
+    stat = engine.rulebook.stats[("qwenpaw", "loop")]
+    assert stat.judge_disagree == 1 and stat.judge_agree == 0
+    assert Rulebook.load(engine.rulebook_path).stats[("qwenpaw", "loop")].judge_disagree == 1
+
+
+def test_a_judge_outage_labels_nothing(tmp_path):
+    """A fail-open PASS from an unreachable judge is not an opinion about the
+    detectors; the pending fires wait for a review that actually happened."""
+    from agent_shepherd.core.types import Verdict
+
+    engine, _ = _engine_and_scorer(str(tmp_path / "ledger"))
+
+    class DownScorer:
+        def score(self, event, history):
+            raise RuntimeError("connection refused")
+
+    engine.scorer = DownScorer()
+    for i in range(3):
+        engine.process(_loop_call(i, "down"))
+    engine.take_pending_verdict(Agent.QWENPAW, "down")
+    engine.process(_gate(3, "down"))
+    assert engine.rulebook.stats == {}, "an outage must not count as disagreement"
+
+    engine.scorer = FakeScorer(
+        Verdict(
+            action=VerdictAction.NUDGE, reason="drift", guidance="fix it", confidence=0.9, detector="judge"
+        )
+    )
+    engine.process(_gate(4, "down"))
+    assert engine.rulebook.stats[("qwenpaw", "loop")].judge_agree == 1
+
+
+def test_rulebook_judge_feedback_can_be_disabled(tmp_path):
+    from agent_shepherd.core.config import PolicyConfig as _PC
+
+    engine, _ = _engine_and_scorer(
+        str(tmp_path / "ledger"), policy=_PC(rulebook_judge_feedback=False)
+    )
+    for i in range(3):
+        engine.process(_loop_call(i, "off"))
+    engine.take_pending_verdict(Agent.QWENPAW, "off")
+    engine.process(_gate(3, "off"))
+    assert engine.rulebook.stats == {}

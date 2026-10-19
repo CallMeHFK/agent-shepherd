@@ -31,6 +31,7 @@ ESCALATE (hand control to the human).
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -55,6 +56,34 @@ from .rules.rulebook import Rulebook
 from .types import Agent, AgentEvent, EventType, Verdict, VerdictAction
 
 
+def _managed_by(cgroup: str) -> str:
+    """Classify a ``/proc/self/cgroup`` body: unit-managed or not.
+
+    systemd puts unit processes in a ``.service`` cgroup, while anything
+    started from a shell stays in that shell's ``.scope`` — and ``INVOCATION_ID``
+    is inherited by every child of a session that already runs under systemd,
+    which would mislabel an ordinary `shepherd start` as unit-managed.
+    """
+    leaf = cgroup.strip().rsplit("/", 1)[-1]
+    return "systemd" if leaf.endswith(".service") else "manual"
+
+
+def _health_payload() -> dict[str, Any]:
+    """Who is answering /health, so `shepherd stop` can stop the right thing.
+
+    A bare SIGTERM is only safe when nobody will restart the process: the
+    shipped systemd unit has ``Restart=always``, so signalling it directly
+    leaves the machine supervised again two seconds later with the user
+    believing supervision is off.
+    """
+    try:
+        with open("/proc/self/cgroup", encoding="utf-8") as fh:
+            cgroup = fh.read()
+    except OSError:
+        cgroup = ""
+    return {"ok": True, "pid": os.getpid(), "managed_by": _managed_by(cgroup)}
+
+
 @dataclass
 class SessionState:
     """Sliding window of recent events for one agent session, plus its costs."""
@@ -69,6 +98,10 @@ class SessionState:
     # confirmed drift in it. Together they give the risk model its label.
     judge_scores: list[float] = field(default_factory=list)
     tier0_confirmed: bool = False
+    # Detectors whose admitted nudge reached the agent since the last judge
+    # review. The next review labels each one (self-evolution feedback), so
+    # this is a set in list form — at most one entry per detector.
+    tier0_pending: list[str] = field(default_factory=list)
     events_seen: int = 0
     judge_calls: int = 0
     judge_tokens: int = 0
@@ -261,6 +294,38 @@ class PolicyEngine:
             detector=verdict.detector,
         )
 
+    def _feed_rulebook(self, event: AgentEvent, verdict: Verdict | None, state: SessionState) -> None:
+        """Online self-evolution: label pending Tier 0 nudges with this review.
+
+        Each detector whose nudge actually reached the agent since the last
+        judge review gets one scorecard entry: *agreed* when the review's drift
+        score clears the risk gate's admission line (the same calibrated cut
+        that decides whether the judge's own nudge is injected), *disagreed*
+        otherwise. The rulebook turns agreement into reinforcement and repeated
+        disagreement into demotion, then exclusion from promotion — so the
+        Tier 0 rulebook is updated by Tier 1 scoring and the risk gate, not
+        only by the behavioural adherence it already had. Judge wakes are rare
+        (checkpoint-gated), so persisting the book here is cheap; a failed save
+        is swallowed by ``Rulebook.save``.
+        """
+        if self.rulebook is None or not self.config.policy.rulebook_judge_feedback:
+            state.tier0_pending.clear()
+            return
+        if not state.tier0_pending:
+            return
+        if verdict is None or "judge unavailable" in verdict.reason:
+            # An outage or an absent scorer is not an opinion about anything:
+            # the labels wait for a review that actually happened.
+            return
+        limit = self.risk.threshold_for(f"{event.agent.value}:judge")
+        agreed = verdict.confidence >= limit
+        for detector in state.tier0_pending:
+            self.rulebook.note_judge_feedback(
+                detector, agreed=agreed, agent=event.agent, ts=event.ts
+            )
+        state.tier0_pending.clear()
+        self.rulebook.save(self.rulebook_path)
+
     def note_outcome(self, agent: Agent, session_id: str, key: str, score: float, is_drift: bool) -> None:
         """Feed one labeled outcome to the risk model and refit that threshold.
 
@@ -412,6 +477,11 @@ class PolicyEngine:
                 return self._silent(state, event, verdict.reason)
             self._tally(state, verdict)
             state.tier0_confirmed = True
+            # Queue the detector for the next judge review: whether the Tier 1
+            # scorer (through the risk gate) agrees this window was real is the
+            # online label the rulebook's scorecard evolves on.
+            if verdict.detector and verdict.detector not in state.tier0_pending:
+                state.tier0_pending.append(verdict.detector)
             self.ledger.record_verdict(
                 event.agent, event.session_id, verdict, context=self._cost(state)
             )
@@ -424,6 +494,9 @@ class PolicyEngine:
             verdict = self._score(event, history)
             if verdict is not None:
                 state.judge_scores.append(verdict.confidence)
+            # Self-evolution: this review is an online opinion about every
+            # Tier 0 nudge that reached the agent since the previous one.
+            self._feed_rulebook(event, verdict, state)
             usage = getattr(self.scorer, "last_usage", None) or {}
             state.judge_tokens += int(usage.get("total_tokens") or 0)
             if verdict is not None:
@@ -547,7 +620,7 @@ class ShepherdDaemon:
                     return
 
                 if self.path == "/health":
-                    self._send_json({"ok": True})
+                    self._send_json(_health_payload())
                     return
 
                 parts = self.path.strip("/").split("/")
@@ -594,7 +667,7 @@ class ShepherdDaemon:
 
             def do_GET(self) -> None:
                 if self.path == "/health":
-                    self._send_json({"ok": True})
+                    self._send_json(_health_payload())
                     return
                 parts = self.path.strip("/").split("/")
                 if len(parts) == 3 and parts[0] == "pending":
