@@ -35,6 +35,7 @@ ledger of everything it saw, and ships an offline counterfactual benchmark so
 - [Audit and replay](#audit-and-replay)
 - [Measuring it](#measuring-it)
 - [Running it as a service](#running-it-as-a-service)
+- [Uninstalling](#uninstalling)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 
@@ -60,6 +61,9 @@ shepherd stats qwenpaw <session-id>   # after a session: what it saw, what it co
 Tier 0 needs no model and no key: with no judge reachable, the detectors still
 run and the benchmark still scores them (that is exactly what CI does). Adding a
 judge buys the second tier — see [Judge backends](#judge-backends).
+
+To take it all off again later: `shepherd uninstall all` — one command, no
+hand-editing, see [Uninstalling](#uninstalling).
 
 ## How it works
 
@@ -146,7 +150,8 @@ Installing any adapter is conservative: the previous `settings.json` /
 `hooks.json` is copied to a timestamped `.bak` first, an unparseable existing
 file is refused rather than replaced, foreign hook groups are left alone, and a
 previous QwenPaw bundle is moved to `~/.qwenpaw/plugin-archive/` instead of
-being deleted.
+being deleted. `shepherd uninstall` keeps the same posture in reverse — see
+[Uninstalling](#uninstalling).
 
 ### Import the bundle from a release instead of a checkout
 
@@ -320,7 +325,7 @@ to be right.
 shepherd start              # foreground
 shepherd start-bg           # detached; writes ~/.shepherd/daemon.pid and daemon.log
 shepherd status             # up / down — down means supervision is silently failing open
-shepherd stop               # SIGTERM the start-bg process
+shepherd stop               # works however the daemon was started
 ```
 
 For a machine that should always be supervising, a systemd user unit ships with
@@ -333,9 +338,40 @@ install -Dm644 packaging/shepherd.service ~/.config/systemd/user/shepherd.servic
 systemctl --user daemon-reload && systemctl --user enable --now shepherd
 ```
 
+`shepherd stop` stops whichever daemon is actually serving: the `start-bg`
+pidfile when there is one, otherwise it asks `/health`, which reports the
+daemon's own pid and who owns it. A unit-managed daemon goes through
+`systemctl --user stop shepherd`, because the shipped unit restarts on a bare
+SIGTERM — signalling it directly would leave the machine supervised again two
+seconds later.
+
 The first start pays the drift detector's Monte-Carlo threshold fit (a few
 seconds) before it binds; the result is cached in
 `~/.shepherd/cusum_thresholds.json`, so later starts bind immediately.
+
+## Uninstalling
+
+One command, per direction — no hand-editing another tool's JSON, no hunting
+for the daemon process:
+
+```bash
+shepherd uninstall claude       # or: codex | qwenpaw | all
+shepherd uninstall all --purge  # also deletes ~/.shepherd: config, ledger, rulebook, thresholds
+shepherd uninstall all --dry-run  # show what would go, change nothing
+```
+
+Uninstall removes exactly what `shepherd install` wrote. Foreign hooks,
+settings and plugins are left alone; every edit is backed up to a timestamped
+`.bak` first; and a config file that carried nothing but ours is deleted rather
+than left as an empty husk. The QwenPaw bundle is *moved* to
+`~/.qwenpaw/plugin-archive/` (same place install keeps previous versions), never
+deleted. When no adapter remains, the daemon is stopped for you — otherwise it
+would sit there with nothing posting to it, or worse, a systemd unit would keep
+restarting it.
+
+`--purge` is the only destructive step, and it is opt-in by name: it deletes
+`~/.shepherd`, which is the session ledger, the learned rulebook, the fitted
+thresholds and your config. Without it those survive an adapter uninstall.
 
 ## Troubleshooting
 
@@ -347,6 +383,7 @@ seconds) before it binds; the result is cached in
 | `codex exec` shows no supervision | untrusted hooks are skipped without warning; pass `--dangerously-bypass-hook-trust` |
 | Hook calls raise `ImportError` about SOCKS | proxy environment leaking into loopback calls; daemon calls must use `trust_env=False` |
 | A config edit does nothing | `shepherd config show` — the `source` column says whether a `file` key is being overridden by an `env:` one, and `doctor` flags keys this release no longer reads |
+| Supervision continues after uninstalling one agent | by design: the daemon stays for the adapters that remain. `shepherd uninstall all` stops it, and a systemd unit is stopped through systemctl so `Restart=always` cannot bring it back |
 
 ## Development
 

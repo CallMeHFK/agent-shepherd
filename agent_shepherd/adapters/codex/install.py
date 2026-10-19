@@ -67,3 +67,4 @@ def install_codex(dry_run: bool = False) -> None:
         "      in the interactive Codex TUI, or pass --dangerously-bypass-hook-trust\n"
         "      to `codex exec` for automation (untrusted hooks are silently skipped)."
     )
+    print("restart Codex (or start a new session) to load the hooks")

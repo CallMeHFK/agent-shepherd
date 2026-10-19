@@ -31,6 +31,7 @@ ESCALATE (hand control to the human).
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -53,6 +54,34 @@ from .rules.detectors import (
 )
 from .rules.rulebook import Rulebook
 from .types import Agent, AgentEvent, EventType, Verdict, VerdictAction
+
+
+def _managed_by(cgroup: str) -> str:
+    """Classify a ``/proc/self/cgroup`` body: unit-managed or not.
+
+    systemd puts unit processes in a ``.service`` cgroup, while anything
+    started from a shell stays in that shell's ``.scope`` — and ``INVOCATION_ID``
+    is inherited by every child of a session that already runs under systemd,
+    which would mislabel an ordinary `shepherd start` as unit-managed.
+    """
+    leaf = cgroup.strip().rsplit("/", 1)[-1]
+    return "systemd" if leaf.endswith(".service") else "manual"
+
+
+def _health_payload() -> dict[str, Any]:
+    """Who is answering /health, so `shepherd stop` can stop the right thing.
+
+    A bare SIGTERM is only safe when nobody will restart the process: the
+    shipped systemd unit has ``Restart=always``, so signalling it directly
+    leaves the machine supervised again two seconds later with the user
+    believing supervision is off.
+    """
+    try:
+        with open("/proc/self/cgroup", encoding="utf-8") as fh:
+            cgroup = fh.read()
+    except OSError:
+        cgroup = ""
+    return {"ok": True, "pid": os.getpid(), "managed_by": _managed_by(cgroup)}
 
 
 @dataclass
@@ -591,7 +620,7 @@ class ShepherdDaemon:
                     return
 
                 if self.path == "/health":
-                    self._send_json({"ok": True})
+                    self._send_json(_health_payload())
                     return
 
                 parts = self.path.strip("/").split("/")
@@ -638,7 +667,7 @@ class ShepherdDaemon:
 
             def do_GET(self) -> None:
                 if self.path == "/health":
-                    self._send_json({"ok": True})
+                    self._send_json(_health_payload())
                     return
                 parts = self.path.strip("/").split("/")
                 if len(parts) == 3 and parts[0] == "pending":

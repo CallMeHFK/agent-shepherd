@@ -38,3 +38,4 @@ def install_claude(dry_run: bool = False) -> None:
     print(f"installed Claude Code supervisor hooks -> {settings_path}")
     if saved:
         print(f"previous settings preserved at {saved}")
+    print("restart Claude Code — hooks are read when a session starts")

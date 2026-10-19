@@ -24,6 +24,15 @@ def _parser() -> argparse.ArgumentParser:
     install.add_argument("agent", choices=["qwenpaw", "claude", "codex"])
     install.add_argument("--dry-run", action="store_true")
 
+    uninstall = sub.add_parser("uninstall", help="remove adapter hooks this tool wrote (never anything else)")
+    uninstall.add_argument("agent", choices=["qwenpaw", "claude", "codex", "all"])
+    uninstall.add_argument("--dry-run", action="store_true")
+    uninstall.add_argument(
+        "--purge",
+        action="store_true",
+        help="also delete ~/.shepherd: config, session ledger, rulebook, fitted thresholds",
+    )
+
     start = sub.add_parser("start", help="start the supervisor daemon in the foreground")
     start.add_argument("--port", type=int, help="override config port (or SHEPHERD_PORT)")
     start_bg = sub.add_parser("start-bg", help="start the daemon detached, writing a pidfile")
@@ -85,6 +94,102 @@ def _pidfile() -> Path:
     from .core.ledger import default_root
 
     return default_root() / "daemon.pid"
+
+
+def _daemon_url(cfg: ShepherdConfig) -> str:
+    return os.environ.get("SHEPHERD_DAEMON_URL", f"http://127.0.0.1:{cfg.port}").rstrip("/")
+
+
+def _adapter_installed(agent: str) -> bool:
+    """Whether this agent still carries shepherd hooks or a plugin on disk."""
+    path = {
+        "claude": Path.home() / ".claude" / "settings.json",
+        "codex": Path.home() / ".codex" / "hooks.json",
+        "qwenpaw": Path.home() / ".qwenpaw" / "plugins" / "agent-shepherd",
+    }[agent]
+    if not path.exists():
+        return False
+    if path.is_dir():
+        return True
+    try:
+        return "shepherd" in path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+
+
+def _stop_daemon(cfg: ShepherdConfig) -> int:
+    """Stop the daemon however it was started.
+
+    ``start-bg`` leaves a pidfile, but a foreground ``shepherd start`` or the
+    systemd unit does not, and "no pidfile" used to be the end of the story —
+    the user was told to go find the process themselves. A pidfile that names a
+    dead process is not the end of it either: the systemd unit outlives the
+    start-bg process it replaced. So every dead end falls through to one
+    question asked of /health, which now reports the daemon's own pid and who
+    owns it — signal a manual process, and hand a systemd unit to systemctl,
+    because the shipped unit restarts on a bare SIGTERM.
+    """
+    import signal
+
+    path = _pidfile()
+    if path.exists():
+        try:
+            pid = int(path.read_text().strip() or 0)
+        except ValueError:
+            pid = 0
+        path.unlink(missing_ok=True)
+        if pid <= 0:
+            print(f"pidfile {path} held no pid; removed it")
+        else:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                print(f"sent SIGTERM to {pid}")
+                return 0
+            except ProcessLookupError:
+                print(f"pidfile named pid {pid}, which is not running; removed it")
+            except PermissionError:
+                print(f"pid {pid} belongs to another user; stop it by hand", file=sys.stderr)
+                return 1
+
+    import httpx
+
+    url = _daemon_url(cfg)
+    try:
+        info = httpx.get(f"{url}/health", timeout=2.0, trust_env=False).json()
+    except Exception:  # noqa: BLE001 - nothing is listening; that is the answer
+        print(f"no daemon running on {url}")
+        return 0
+    if not info.get("ok"):
+        print(f"{url} answered but is not healthy; stop it where it was started", file=sys.stderr)
+        return 1
+    if info.get("managed_by") == "systemd":
+        import subprocess
+
+        # Restart=always means a direct SIGTERM comes back in two seconds; the
+        # unit's own stop path is the only intentional one.
+        proc = subprocess.run(
+            ["systemctl", "--user", "stop", "shepherd"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            print("stopped the systemd user unit `shepherd`")
+            return 0
+        print(f"systemctl failed: {proc.stderr.strip() or proc.returncode}", file=sys.stderr)
+        print("stop it with `systemctl --user stop shepherd`", file=sys.stderr)
+        return 1
+    pid = info.get("pid")
+    if isinstance(pid, int) and pid > 0:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"sent SIGTERM to {pid}")
+            return 0
+        except (ProcessLookupError, PermissionError) as exc:
+            print(f"cannot signal pid {pid}: {exc}", file=sys.stderr)
+            return 1
+    print(f"the daemon on {url} did not report a pid; stop it where it was started", file=sys.stderr)
+    return 1
 
 
 def _agent(name: str) -> Agent:
@@ -161,20 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.command == "stop":
-        import signal
-
-        path = _pidfile()
-        if not path.exists():
-            print("no pidfile: the daemon was not started with `shepherd start-bg`", file=sys.stderr)
-            return 1
-        pid = int(path.read_text().strip() or 0)
-        try:
-            os.kill(pid, signal.SIGTERM)
-            print(f"sent SIGTERM to {pid}")
-        except ProcessLookupError:
-            print(f"pid {pid} is not running; removed stale pidfile")
-        path.unlink(missing_ok=True)
-        return 0
+        return _stop_daemon(cfg)
 
     if args.command == "status":
         import httpx
@@ -235,6 +327,93 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        if args.dry_run:
+            return 0
+        if args.agent in ("claude", "codex"):
+            # The hooks call `shepherd-hook` by name; if the console script is
+            # not on PATH every event fails silently, which looks exactly like
+            # "nothing happens".
+            import shutil
+
+            if shutil.which("shepherd-hook") is None:
+                print(
+                    "warning: `shepherd-hook` is not on PATH — the hooks would fail "
+                    "silently. Add the directory pip installed it to (often "
+                    "~/.local/bin) to PATH, then restart the agent.",
+                    file=sys.stderr,
+                )
+        # Hooks with no daemon behind them fail open and look like "nothing
+        # happens" too. One probe here is cheaper than that support question.
+        import httpx
+
+        url = _daemon_url(cfg)
+        try:
+            healthy = httpx.get(f"{url}/health", timeout=2.0, trust_env=False).json().get("ok")
+        except Exception:  # noqa: BLE001 - report, never fail the install
+            healthy = False
+        if not healthy:
+            print(
+                f"daemon DOWN on {url} — supervision fails open until you run "
+                "`shepherd start-bg` (or `systemctl --user start shepherd`)",
+                file=sys.stderr,
+            )
+        return 0
+
+    if args.command == "uninstall":
+        from .adapters.backup import UnparseableConfig
+        from .core.ledger import default_root
+
+        names = ["qwenpaw", "claude", "codex"] if args.agent == "all" else [args.agent]
+        try:
+            for name in names:
+                print(f"uninstalling {name} adapter (dry-run={args.dry_run})")
+                if name == "qwenpaw":
+                    from .adapters.uninstall import uninstall_qwenpaw
+
+                    uninstall_qwenpaw(dry_run=args.dry_run)
+                elif name == "claude":
+                    from .adapters.uninstall import uninstall_claude
+
+                    uninstall_claude(dry_run=args.dry_run)
+                else:
+                    from .adapters.uninstall import uninstall_codex
+
+                    uninstall_codex(dry_run=args.dry_run)
+        except UnparseableConfig as exc:
+            print(
+                f"refusing to edit: {exc}\n"
+                "the existing config does not parse, and rewriting it would destroy "
+                "hand-edited settings. Fix the file (or delete it) and re-run.",
+                file=sys.stderr,
+            )
+            return 2
+        if args.dry_run:
+            print("dry-run: nothing was changed")
+            return 0
+
+        # A daemon nothing posts to is just a process — but one that a systemd
+        # unit restarts forever is a trap, so stop it once no adapter remains.
+        remaining = [n for n in ("qwenpaw", "claude", "codex") if n not in names and _adapter_installed(n)]
+        if remaining:
+            print(f"daemon left running — {', '.join(remaining)} still use it (`shepherd stop` stops it)")
+        else:
+            _stop_daemon(cfg)
+
+        if args.purge:
+            root = default_root()
+            if root.exists():
+                import shutil
+
+                held = sorted(p.name for p in root.iterdir())
+                shutil.rmtree(root)
+                print(f"purged {root} (held: {', '.join(held)})")
+            else:
+                print(f"nothing to purge: {root} does not exist")
+        else:
+            print(
+                f"supervisor state kept at {default_root()} (config, session ledger, "
+                "rulebook, fitted thresholds) — re-run with --purge to delete it too"
+            )
         return 0
 
     if args.command == "stats":
@@ -391,11 +570,7 @@ def main(argv: list[str] | None = None) -> int:
                 "codex": Path.home() / ".codex" / "hooks.json",
                 "qwenpaw": Path.home() / ".qwenpaw" / "plugins" / "agent-shepherd",
             }[agent]
-            marker = installed.exists() and (
-                "shepherd" in installed.read_text(encoding="utf-8", errors="ignore")
-                if installed.is_file()
-                else True
-            )
+            marker = _adapter_installed(agent)
             note = ""
             if not marker and agent == "claude":
                 note = "  (a provider switcher may own this file; re-run `shepherd install claude` after switching)"
