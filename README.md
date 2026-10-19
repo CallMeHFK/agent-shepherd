@@ -43,8 +43,8 @@ ledger of everything it saw, and ships an offline counterfactual benchmark so
 
 ```bash
 # the supervisor. not on PyPI — either of these two, both checked:
-uv pip install "git+https://github.com/CallMeHFK/agent-shepherd.git"   # or @v0.3.0 to pin
-pip install https://github.com/CallMeHFK/agent-shepherd/releases/latest/download/agent_shepherd-0.3.0-py3-none-any.whl  # no git client
+uv pip install "git+https://github.com/CallMeHFK/agent-shepherd.git"   # or @v0.4.0 to pin
+pip install https://github.com/CallMeHFK/agent-shepherd/releases/latest/download/agent_shepherd-0.4.0-py3-none-any.whl  # no git client
 
 shepherd start-bg              # daemon on 127.0.0.1:4890; writes ~/.shepherd/config.yaml on first start
 shepherd install qwenpaw       # or: claude | codex — writes hooks, never clobbers them blind
@@ -165,7 +165,7 @@ qwenpaw plugin install \
 
 That URL is permanent — the bundle is named after the plugin, not the release,
 because the version the host displays comes from the `plugin.json` inside it. To
-install one known release, swap `latest` for the tag (`.../download/v0.3.0/...`).
+install one known release, swap `latest` for the tag (`.../download/v0.4.0/...`).
 A local path works identically (`qwenpaw plugin install agent-shepherd.zip`), and
 so do the app's plugin routes: upload the zip, or hand it the URL. Running QwenPaw
 hot-loads it; a stopped one loads it on the next start. The archive holds exactly

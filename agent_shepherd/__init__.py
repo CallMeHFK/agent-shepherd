@@ -1,3 +1,3 @@
 """agent-shepherd: a supervisor plugin that observes AI agents and injects corrective guidance."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

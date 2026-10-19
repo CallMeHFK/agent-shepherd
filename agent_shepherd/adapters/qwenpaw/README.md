@@ -14,8 +14,8 @@ install. So the daemon has to be there:
 
 ```bash
 # The package is not on PyPI. Either of these two:
-pip install https://github.com/CallMeHFK/agent-shepherd/releases/latest/download/agent_shepherd-0.3.0-py3-none-any.whl
-uv pip install "git+https://github.com/CallMeHFK/agent-shepherd.git"   # @v0.3.0 to pin
+pip install https://github.com/CallMeHFK/agent-shepherd/releases/latest/download/agent_shepherd-0.4.0-py3-none-any.whl
+uv pip install "git+https://github.com/CallMeHFK/agent-shepherd.git"   # @v0.4.0 to pin
 
 shepherd start-bg
 shepherd status        # "up", and check the `code loaded from:` line it prints
